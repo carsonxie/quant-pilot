@@ -1,0 +1,49 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# --- Virtual Environment ---
+.venv/
+venv/
+env/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Quant-Pilot 数据 (不入库) ---
+data/quant_pilot.duckdb
+data/*.duckdb
+data/cleaned/
+data/factors/
+
+# --- Jupyter Notebooks ---
+notebooks/*.ipynb
+.ipynb_checkpoints/
+
+# --- 环境变量与密钥 ---
+.env
+.env.local
+*.secret
+
+# --- uv lock (保留 pyproject.toml 即可) ---
+uv.lock
+
+# --- 测试产物 ---
+.pytest_cache/
+htmlcov/
+.coverage
+*.coverage.*
+coverage.xml

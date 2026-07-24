@@ -1,0 +1,50 @@
+# ============================================================
+# factor_registry.yaml — Quant-Pilot 因子注册表（权威来源）
+# ============================================================
+#
+# 版本: v1.0
+# 创建日期: 2025-07-18
+#
+# 说明:
+#   - 本文件是所有因子的权威注册来源。每个因子的 code_path 必须指向
+#     一个可导入的 Python 函数。
+#   - 新增因子时必须同步更新本文件，删除/弃用因子时标记 status: deprecated
+#     并记录 change_log。
+#   - CI 校验 (uv run factor-check) 在每次提交前验证本文件与代码的双向一致性。
+#
+# 字段说明:
+#   name              — 因子显示名称
+#   category          — 量价 / 基本面 / 宏观 / 情绪
+#   direction         — 正向 / 反向 / 中性
+#   status            — active / deprecated / evaluating
+#   formula           — 数学公式 (LaTeX 风格)
+#   description       — 一句话描述
+#   code_path         — Python 函数路径 (module::function)
+#   added_phase       — 引入本因子的 Phase
+#   added_date        — 注册日期
+#   params            — 可调参数及默认值
+#   preprocessing     — 预处理方法
+#   evaluation        — 评估指标 (null = 待评估)
+#   related_factors   — 关联因子 ID 列表
+#   used_by           — 使用本因子的策略模块
+#   change_log        — 变更历史
+# ============================================================
+
+# 元数据
+metadata:
+  registry_version: "1.0"
+  last_updated: "2025-07-18"
+  total_factors: 0
+  active_factors: 0
+  deprecated_factors: 0
+  evaluating_factors: 0
+
+# 因子索引 (按类别分组)
+index:
+  量价: []
+  基本面: []
+  宏观: []
+  情绪: []
+
+# 因子定义 (待 P0-D3 / P1-D1 开始填充)
+factors: {}

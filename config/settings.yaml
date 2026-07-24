@@ -1,0 +1,116 @@
+# ============================================================
+# settings.yaml — Quant-Pilot 全局参数唯一来源
+# ============================================================
+# 版本: v1.0 | 创建: 2025-07-18
+#
+# 规则:
+#   - 所有参数必须从此文件读取，禁止在代码中硬编码
+#   - 修改此文件中的参数值，必须在 PROJECT_MEMORY.md 中记录变更
+#   - 资金/风险相关参数修改前必须先向用户确认
+# ============================================================
+
+# --- 项目元数据 ---
+project:
+  name: "Quant-Pilot"
+  version: "0.1.0"
+  random_seed: 42
+
+# --- 数据存储 ---
+storage:
+  db_path: "data/quant_pilot.duckdb"
+  cleaned_dir: "data/cleaned"
+  factors_dir: "data/factors"
+
+# --- 数据获取 ---
+data_fetch:
+  source: "sina"                # sina (默认, 新浪财经, 稳定) | eastmoney (备用)
+  default_start_date: "20190101"
+  # 反封锁措施：每次 API 调用后随机休眠 (秒) — 仅 eastmoney
+  min_sleep: 0.1
+  max_sleep: 0.5
+  # 重试配置
+  max_retries: 3
+  retry_backoff_base: 5  # 秒, 指数退避基数
+
+# --- 标的池 (P0 初始: ~20 只 ETF) ---
+universe:
+  # 宽基 ETF (T+1)
+  broad_base:
+    - {symbol: "510300", name: "沪深300ETF",market_type: "A股", settlement: "T+1"}
+    - {symbol: "510050", name: "上证50ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "510500", name: "中证500ETF",market_type: "A股", settlement: "T+1"}
+    - {symbol: "159915", name: "创业板ETF",market_type: "A股", settlement: "T+1"}
+    - {symbol: "588000", name: "科创50ETF",market_type: "A股", settlement: "T+1"}
+    - {symbol: "512100", name: "中证1000ETF",market_type: "A股", settlement: "T+1"}
+
+  # 行业主题 ETF (T+1)
+  sector:
+    - {symbol: "159995", name: "芯片ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "512480", name: "半导体ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "512010", name: "医药ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "159928", name: "消费ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "512880", name: "证券ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "516160", name: "新能源ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "512690", name: "酒ETF", market_type: "A股", settlement: "T+1"}
+
+  # 跨境 / 商品 ETF (T+0)
+  cross_border_commodity:
+    - {symbol: "513100", name: "纳指ETF",          market_type: "跨境", settlement: "T+0"}
+    - {symbol: "159920", name: "恒生ETF",          market_type: "跨境", settlement: "T+0"}
+    - {symbol: "513500", name: "标普500ETF",       market_type: "跨境", settlement: "T+0"}
+    - {symbol: "159941", name: "纳指ETF(广发)",     market_type: "跨境", settlement: "T+0"}
+    - {symbol: "518880", name: "黄金ETF",          market_type: "商品", settlement: "T+0"}
+    - {symbol: "513050", name: "中概互联ETF",       market_type: "跨境", settlement: "T+0"}
+
+# --- 交易成本 (实盘与回测必须一致) ---
+trading_cost:
+  commission_bps: 0.15          # 双边佣金 (万分之1.5)
+  min_commission_per_trade: 0.0 # 最低佣金 (ETF 免最低佣金)
+  slippage_base_bps: 0.15       # 基础滑点 (万分之1.5)
+  impact_formula: "max(0.0015, trade_amount / avg_daily_amount * 0.005)"
+  # 滑点 = max(0.15%, 交易金额/日均成交额 × 0.5%)
+  stamp_duty: 0.0               # ETF 免印花税
+
+# --- 宏观择时 (第一层漏斗) ---
+macro_timing:
+  weight_trend: 0.30            # 趋势动量权重
+  weight_breadth: 0.25          # 市场宽度权重
+  weight_volatility: 0.20       # 波动率权重 (P1)
+  weight_capital_flow: 0.15     # 资金流向权重 (P1)
+  weight_macro_env: 0.10        # 宏观环境权重 (P1)
+  ma_short: 20                  # 短期均线周期
+  ma_long: 60                   # 长期均线周期
+  score_plunge_threshold: 30    # 单日得分骤降阈值 → 强制减仓
+
+# --- 标的清洗 (第二层漏斗) ---
+universe_filter:
+  min_avg_volume: 5000000       # 日均成交额 ≥ 500 万
+  min_list_days: 60             # 上市 ≥ 60 个交易日
+  max_premium_pct: 3.0          # 溢价率 ≤ 3%
+  liquidity_concentration_warn: 0.005  # 持仓/日均成交额 > 0.5% → 警告
+
+# --- 组合优化 (第四层漏斗) ---
+portfolio:
+  method: "inverse_volatility"  # P0: inverse_volatility | P1: risk_parity
+  vol_lookback: 20              # 波动率回溯窗口 (交易日)
+  max_positions: 5              # 最大持仓数
+  min_positions: 1              # 最小持仓数
+
+# --- 风控执行 (第五层漏斗) ---
+risk_management:
+  atr_period: 14                # ATR 计算周期
+  atr_multiplier: 2.0           # 移动止损 N 倍 ATR
+  safe_position_pct: 0.30       # 宏观骤降后安全仓位比例
+  min_hold_days: 3              # 最低持仓天数
+  turnover_threshold: 0.15      # 仓位差异 < 15% 不调仓
+
+# --- 消息推送 ---
+notification:
+  channel: "pushplus"           # pushplus / feishu / email
+  pushplus_token: ""            # 从环境变量或本地文件读取
+  retry_count: 3
+
+# --- 日志 ---
+logging:
+  config_file: "config/logging.conf"
+  default_level: "INFO"
