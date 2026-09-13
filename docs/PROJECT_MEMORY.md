@@ -11,19 +11,19 @@
 | 字段                   | 值                                                                  |
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
-| **当前 Phase**   | P0 — MVP 闭环                                                      |
-| **当前 Task**    | T0.1-T0.9 ✅ → T0.10 就绪 |
-| **Phase 进度**   | 9/10 交付物完成                                                     |
+| **当前 Phase**   | P0 ✅ 完成 → P1 待启动                                                      |
+| **当前 Task**    | T0.1-T0.10 全部 ✅ (P0 完成) |
+| **Phase 进度**   | 10/10 交付物完成                                                     |
 | **Gate 状态**    | 6/6 通过 (P0 全部 Gate ✅)                                 |
-| **最后更新**     | 2026-09-13 (T0.9 完成)                                              |
+| **最后更新**     | 2026-09-13 (T0.10 完成, P0 ✅)                                              |
 
 ---
 
 ## 二、Phase 执行快照
 
-### Phase 0 — MVP 闭环 (进行中)
+### Phase 0 — MVP 闭环 (✅ 已完成)
 
-- **状态**: 🟡 T0.1-T0.9 ✅ → T0.10 (Streamlit 面板) 待开始
+- **状态**: ✅ P0 完成 (2026-09-13) — T0.1~T0.10 全部交付, Gate 6/6 通过
 - **开始日期**: 2025-07-18
 - **预计完成**: 启动后 6-8 周
 - **实际交付物**:
@@ -39,6 +39,8 @@
   - `src/orchestration/daily_pipeline.py` — 每日盘后主流程 (9 步串联五层漏斗) 🆕
   - `src/orchestration/notifier.py` — 消息推送 (PushPlus, 四要素归因, 重试 3 次, CLI 集成) 🆕
   - `src/backtest/custom_loop.py` — 自研回测引擎 (T+0/T+1 撮合, 摩擦成本, 动态仓位上限, 整手) 🆕
+  - `dashboard/data_loader.py` — 面板数据层 (信号/持仓视图/价格曲线/宏观历史, 可单测) 🆕
+  - `dashboard/app.py` — Streamlit 信号面板 (宏观卡/信号表/持仓/走势/宏观趋势) 🆕
   - `data/quant_pilot.duckdb` — 19 ETFs 全量历史 OHLCV (34,073 rows) + 11 条真实信号
   - `tests/test_duckdb_manager.py` — 14 tests ✅
   - `tests/test_validator.py` — 21 tests ✅
@@ -49,6 +51,13 @@
   - `tests/test_daily_pipeline.py` — 6 tests ✅ 🆕 (含幂等/脏数据阻断/无未来函数)
   - `tests/test_notifier.py` — 22 tests ✅ 🆕 (PushPlus mock HTTP, 重试/token 边界)
   - `tests/test_custom_loop.py` — 20 tests ✅ 🆕 (撮合时序/成本/交收/真实数据验收)
+  - `tests/test_dashboard.py` — 16 tests ✅ 🆕 (含 AppTest 冒烟/真实库一致性)
+- **实际完成**: 2026-09-13 (全量测试 242/242, 交付物 10/10)
+- **P0 遗留承接 (P1 须关注)**:
+  - I-02: Python 3.14 vs vectorbt/alphalens 兼容性 (P1 启动前决策)
+  - EV-006: NAV/IOPV 未入库, 溢价检查静默跳过
+  - EV-008: 复权口径 — 待修订 AGENTS §5.2 条款 + Sina 数据 DIY 后复权
+  - EV-011: 组合优化 Top-N 截断致仓位利用率低 (P1 风险平价时评估)
 - **Gate Criteria 状态**:
   - [x] 闭环验收：daily_pipeline.py 完整跑通 → 2026-09-11 全流程 EXIT=0, PushPlus 真实推送成功
   - [x] 回测正确性：510300 买入持有年化 vs 自身价格基准偏差 0.044% < 1% (2026-09-13, T0.9)
@@ -200,6 +209,21 @@
 - **影响范围**: `src/backtest/custom_loop.py`, `tests/test_custom_loop.py`, `config/settings.yaml` (trading_cost 重构 + backtest 段); P0 Gate "回测正确性" "T+0/T+1 正确性" 由本条闭环 → P0 Gate 6/6
 - **后续动作**: T1.9 vectorbt 对照 (相关系数 > 0.9999) 时复用本引擎验收口径; P1 若引入真实指数数据可加 "vs 000300" 参考报告; 回测接入 daily_pipeline 信号回放留待 P1
 
+### EV-014 — Streamlit 信号面板 (T0.10) 与 P0 Phase 完成 🎉
+
+- **日期**: 2026-09-13
+- **类型**: 关键设计决策 / Phase 里程碑
+- **与 task.md 关系**: 互补 (T0.10 实现细节 + P0 收官)
+- **描述**: T0.10 面板决策与 P0 收官事实:
+  - **页面结构 (用户确认口径)**: 宏观状态卡 (得分/regime/仓位上限) → 今日信号表 (代码/名称/方向/目标仓位/触发原因) → 建议目标持仓 (系统无实盘持仓数据, 展示信号 target_weight > 0 的目标视图, 空仓友好提示) → 近期走势 (建议持仓标的归一化收盘价, 首日=100, 空仓回退基准 510300) → 宏观得分趋势 (近 120 交易日)
+  - **分层**: `dashboard/data_loader.py` 纯数据层 (不 import streamlit, 可单测) + `dashboard/app.py` 纯渲染; dashboard 加入 hatchling packages 实现全项目导入
+  - **宏观趋势重算**: 沿用无状态设计 (EV-009) 逐日截断重算; 实测 120 天逐日 ~13s 过慢 → step=5 采样 (~2.5s), 始终包含最新交易日; 测试保留 step=1 与直接计算的一致性校验 (首尾点)
+  - **依赖**: streamlit 1.59.2 从 p1 optional 组移入主 dependencies (P0-D10 交付所需, Python 3.14 兼容已验证); 图表用 streamlit 原生组件, 不引入 plotly
+  - **验收**: 16 tests (含 streamlit AppTest 无头执行断言无异常 + 真实库"信号与 DB 记录一致"); headless 服务 `/_stcore/health` = ok, 首页 HTTP 200; 全量 242/242 通过
+  - **P0 收官**: 交付物 10/10, Gate 6/6 全通过 → **P0 Phase 完成**
+- **影响范围**: `dashboard/` (新增), `pyproject.toml` (streamlit 主依赖 + dashboard package); P0 Phase 完成
+- **后续动作**: P1 启动 (T1.1 因子注册表 + 因子模块); ⚠️ P1 前置需解决 I-02 (Python 3.14 vs vectorbt/alphalens); 面板后续可扩实盘持仓录入与净值跟踪 (人工记录) 留待 P1 后评估
+
 ---
 
 ## 四、关键产出索引
@@ -229,6 +253,9 @@
 | 推送单元测试 (22 tests)              | `tests/test_notifier.py`                        | P0    | ✅ 全部通过 🆕               |
 | 自研回测引擎 (T+0/T+1 撮合)          | `src/backtest/custom_loop.py`                   | P0    | ✅ 偏差 0.044% 🆕            |
 | 回测测试 (20 tests)                  | `tests/test_custom_loop.py`                     | P0    | ✅ 全部通过 🆕               |
+| 信号面板数据层                      | `dashboard/data_loader.py`                      | P0    | ✅ 🆕                        |
+| Streamlit 信号面板                   | `dashboard/app.py`                              | P0    | ✅ 冒烟通过 🆕               |
+| 面板数据层测试 (16 tests)            | `tests/test_dashboard.py`                       | P0    | ✅ 全部通过 🆕               |
 
 ---
 
@@ -238,6 +265,9 @@
 | :--- | :----------------------------------------------------------------------------- | :--------- | :----------------------------------------------------- | :------------------------------------------- |
 | I-01 | ~~eastmoney API 间歇性断连~~ → **已解决: 切换至 Sina 数据源** (EV-007) | 2025-07-18 | 反封锁休眠 / 代理绕过 / 指数退避重试 → 最终方案: Sina | 无需帮助                                     |
 | I-02 | Python 3.14 与 vectorbt 不兼容 (P1 需要)                                       | 2025-07-18 | vectorbt 移入 optional-deps p1 分组                    | P1 时用`uv python pin 3.12` 或 Docker 隔离 |
+| I-03 | NAV/IOPV 未入库, 溢价检查静默跳过 (EV-006)                                     | 2025-07-18 | 设计为可选数据源                                       | P0 后评估或 P1 因子期解决                   |
+| I-04 | 复权口径: AGENTS §5.2 "前复权" 条款待修订 + Sina 数据 DIY 后复权 (EV-008)     | 2025-07-19 | eastmoney 备用路径已改 hfq                             | AGENTS 下次修订 / P1 实现                   |
+| I-05 | 组合优化 Top-N 截断致仓位利用率低 (设计内行为, EV-011)                          | 2025-07-24 | 记录观察, P0 不改动                                    | P1 风险平价 (T1.7) 时评估                   |
 
 ---
 
@@ -253,8 +283,33 @@
 8. ~~T0.7: 每日盘后主流程编排~~ (已完成 — EV-009; `uv run daily` 真实冒烟通过, 2.1s 全流程, 信号幂等落库)
 9. ~~T0.8: 消息推送模块~~ (已完成 — EV-012; 2026-09-11 真实推送 PushPlus code=200, 22 tests)
 10. ~~T0.9: 自研回测循环 v0.1~~ (已完成 — EV-013; 偏差 0.044% < 1%, 交收差一天 ✓, 20 tests)
-11. **当前**: 开始 **T0.10** — Streamlit 单页面信号面板 (`dashboard/app.py`, 今日信号+触发原因+持仓+净值; streamlit 在 pyproject 的 p1 optional-deps 组)
-12. ✅ 全量数据已入库: 19 ETFs, 34,073 rows (DuckDB); 11 条真实信号 (最新 2026-09-11)
-13. ✅ 全量测试: 226/226 通过; P0 Gate 6/6 全通过
-14. 📋 运行提示: 推送需 `PUSHPLUS_TOKEN` 环境变量 (EV-012); 回测验收 `uv run backtest` (EV-013)
-15. 参考: `docs/task.md` → P0 T0.10; `docs/spec.md` §4.5 展示层
+11. ~~T0.10: Streamlit 信号面板~~ (已完成 — EV-014; AppTest 冒烟 + headless 服务验证, 16 tests)
+12. **🎉 P0 Phase 完成** (2026-09-13): 交付物 10/10, Gate 6/6
+13. **当前**: 准备 **P1** — 起点 T1.1 (因子注册表初始化 + 因子计算模块); ⚠️ P1 前置需解决 I-02 (Python 3.14 vs vectorbt)
+14. ✅ 全量测试: 242/242 通过
+15. 📋 常用运行命令见 §七 (面板/取数/回测/测试)
+16. 参考: `docs/task.md` → Phase 1; `docs/spec.md` §7 P1
+
+---
+
+## 七、常用运行命令
+
+```powershell
+# 全量取数 (空库初始化 / 重建历史, 19 ETFs 全历史)
+uv run fetch-data
+
+# 每日增量取数 (自动回溯 10 天补拉) + 五层漏斗 + 信号落库 + 手机推送
+uv run daily
+#   真实推送需先设置环境变量 (EV-012):
+#   PowerShell: $env:PUSHPLUS_TOKEN="<token>"; uv run daily
+#   Git Bash:   PUSHPLUS_TOKEN=<token> uv run daily
+
+# 回测 (510300 买入持有偏差验收 + T+0/T+1 交收对比)
+uv run backtest
+
+# Streamlit 信号面板 (默认 http://localhost:8501)
+uv run streamlit run dashboard/app.py
+
+# 全量测试 (242)
+uv run pytest tests/ -v
+```

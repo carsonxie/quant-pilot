@@ -5,7 +5,7 @@
 
 ---
 
-## Phase 0: MVP 闭环 (Minimal Viable Pipeline) — 预计耗时: 6-8 周
+## Phase 0: MVP 闭环 (Minimal Viable Pipeline) — 预计耗时: 6-8 周 ✅ 完成 (2026-09-13)
 
 ### 目标
 让系统每天盘后自动输出一条有理有据、可执行、可追溯的交易建议。打通"数据拉取 → 因子计算 → 信号生成 → 消息推送"全流程。
@@ -66,11 +66,11 @@
   - 依赖: T0.5, T0.6（需要组合优化和风控模块的接口）
   - 验收: 2026-09-13 `uv run backtest` — 510300 买入持有年化 vs 自身价格基准偏差 **0.044% < 1%**（基准口径经用户确认）；510300(T+1) 与 513100(T+0) 交收日相差 1 个交易日 ✅
 
-- [ ] **T0.10** — Streamlit 单页面信号面板 — 预计: 4-6h
-  - 产出: `dashboard/app.py`
-  - 内容: 展示今日信号、触发原因、当前持仓表格、近期净值曲线图；从 DuckDB 读取最新信号和持仓数据
+- [x] **T0.10** — Streamlit 单页面信号面板 — 预计: 4-6h (实际: ~2h)
+  - 产出: `dashboard/app.py`、`dashboard/data_loader.py`、`tests/test_dashboard.py` (16 tests)
+  - 内容: 宏观状态卡 + 今日信号表（含触发原因）+ 建议目标持仓（空仓友好提示）+ 持仓标的归一化走势（空仓回退 510300）+ 宏观得分趋势（近 120 交易日, step=5 采样）；数据层与 UI 解耦；只读 DuckDB
   - 依赖: T0.7, T0.8
-  - 验收: 本地 `streamlit run` 后可看到信号面板；信号与 DuckDB 中记录一致
+  - 验收: streamlit AppTest 无头执行无异常 + headless 服务 health=ok + 真实库信号一致性测试通过 ✅
 
 ### 交付物
 
@@ -85,7 +85,7 @@
 - [x] `src/orchestration/daily_pipeline.py` — 每日主流程
 - [x] `src/orchestration/notifier.py` — 消息推送 (PushPlus, 四要素归因, 重试 3 次)
 - [x] `src/backtest/custom_loop.py` — 自研回测循环 (T+0/T+1 撮合 + 摩擦成本 + 动态仓位)
-- [ ] `dashboard/app.py` — Streamlit 信号面板
+- [x] `dashboard/app.py` — Streamlit 信号面板（含 data_loader 数据层）
 
 ### 验收标准 (Gate Criteria)
 
