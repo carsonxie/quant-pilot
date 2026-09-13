@@ -12,10 +12,10 @@
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
 | **当前 Phase**   | P0 — MVP 闭环                                                      |
-| **当前 Task**    | T0.1-T0.6 ✅ → T0.7 就绪 |
-| **Phase 进度**   | 6/10 交付物完成                                                     |
-| **Gate 状态**    | 全部未通过                                                          |
-| **最后更新**     | 2025-07-24 (Session 收尾交接)                                              |
+| **当前 Task**    | T0.1-T0.9 ✅ → T0.10 就绪 |
+| **Phase 进度**   | 9/10 交付物完成                                                     |
+| **Gate 状态**    | 6/6 通过 (P0 全部 Gate ✅)                                 |
+| **最后更新**     | 2026-09-13 (T0.9 完成)                                              |
 
 ---
 
@@ -23,33 +23,39 @@
 
 ### Phase 0 — MVP 闭环 (进行中)
 
-- **状态**: 🟡 T0.1-T0.6 ✅ → T0.7 待开始
+- **状态**: 🟡 T0.1-T0.9 ✅ → T0.10 (Streamlit 面板) 待开始
 - **开始日期**: 2025-07-18
 - **预计完成**: 启动后 6-8 周
 - **实际交付物**:
   - `pyproject.toml` — 项目配置 (P0 依赖) + CLI 入口修复
   - `config/settings.yaml` — 全局参数 + 19 ETF 标的池 (inline YAML) + Sina 数据源
   - `src/data_pipeline/fetchers/akshare_fetcher.py` — 双源获取 (Sina/eastmoney)
-  - `src/data_pipeline/duckdb_manager.py` — DuckDB 6 表 + 幂等 UPSERT (33,313 rows)
+  - `src/data_pipeline/duckdb_manager.py` — DuckDB 6 表 + 幂等 UPSERT + 信号读写 (upsert_signals/get_latest_signals)
   - `src/data_pipeline/processors/validator.py` — 5 项数据质量护栏
   - `src/strategies/macro_timing.py` — 宏观择时 (维度①②) + 仓位映射
   - `src/strategies/universe_filter.py` — 标的清洗 (4 项筛选 + 流动性警告)
   - `src/strategies/portfolio_optimizer.py` — 波动率倒数加权 + 迭代裁剪
-  - `src/strategies/risk_manager.py` — ATR 移动止损 + 宏观骤降减仓 🆕
-  - `data/quant_pilot.duckdb` — 19 ETFs 全量历史 OHLCV (33,313 rows)
+  - `src/strategies/risk_manager.py` — ATR 移动止损 + 宏观骤降减仓
+  - `src/orchestration/daily_pipeline.py` — 每日盘后主流程 (9 步串联五层漏斗) 🆕
+  - `src/orchestration/notifier.py` — 消息推送 (PushPlus, 四要素归因, 重试 3 次, CLI 集成) 🆕
+  - `src/backtest/custom_loop.py` — 自研回测引擎 (T+0/T+1 撮合, 摩擦成本, 动态仓位上限, 整手) 🆕
+  - `data/quant_pilot.duckdb` — 19 ETFs 全量历史 OHLCV (34,073 rows) + 11 条真实信号
   - `tests/test_duckdb_manager.py` — 14 tests ✅
   - `tests/test_validator.py` — 21 tests ✅
   - `tests/test_macro_timing.py` — 20 tests ✅
   - `tests/test_universe_filter.py` — 39 tests ✅
   - `tests/test_portfolio_optimizer.py` — 43 tests ✅
-  - `tests/test_risk_manager.py` — 41 tests ✅ 🆕
+  - `tests/test_risk_manager.py` — 41 tests ✅
+  - `tests/test_daily_pipeline.py` — 6 tests ✅ 🆕 (含幂等/脏数据阻断/无未来函数)
+  - `tests/test_notifier.py` — 22 tests ✅ 🆕 (PushPlus mock HTTP, 重试/token 边界)
+  - `tests/test_custom_loop.py` — 20 tests ✅ 🆕 (撮合时序/成本/交收/真实数据验收)
 - **Gate Criteria 状态**:
-  - [ ] 闭环验收：daily_pipeline.py 完整跑通
-  - [ ] 回测正确性：买入持有回测与指数偏差 < 1%
-  - [ ] T+0/T+1 正确性：交收日期验证
-  - [ ] 数据护栏有效：脏数据阻断测试
-  - [ ] 信号可追溯：触发原因清晰可读
-  - [ ] 无未来函数：至少一个自动化测试用例
+  - [x] 闭环验收：daily_pipeline.py 完整跑通 → 2026-09-11 全流程 EXIT=0, PushPlus 真实推送成功
+  - [x] 回测正确性：510300 买入持有年化 vs 自身价格基准偏差 0.044% < 1% (2026-09-13, T0.9)
+  - [x] T+0/T+1 正确性：510300 (T+1) 与 513100 (T+0) 交收日相差 1 个交易日 (2026-09-13, T0.9)
+  - [x] 数据护栏有效：脏数据阻断测试 (test_negative_price_blocks_pipeline)
+  - [x] 无未来函数：test_future_data_does_not_change_past_result
+  - [x] 信号可追溯：推送含标的/方向/目标仓位/触发原因四要素 (2026-09-11 真实推送验证)
 
 ---
 
@@ -124,6 +130,37 @@
 - **影响范围**: `akshare_fetcher.py` eastmoney 路径; CLAUDE.md §5.2 规则 #3 需修正 (下次 CLAUDE.md 修订时)
 - **后续动作**: 下次 CLAUDE.md 大版本更新时将"前复权"改为"后复权"; P1 实现 Sina 数据的 DIY 后复权
 
+### EV-009 — daily_pipeline 信号落库与无状态设计 (T0.7)
+
+- **日期**: 2025-07-24
+- **类型**: 关键设计决策
+- **与 task.md 关系**: 互补 (T0.7 实现细节)
+- **描述**: T0.7 每日主流程的三个核心设计决策:
+  - **前日宏观得分无状态化**: 不建宏观得分历史表, 而是将 OHLCV 截断最新一日后重算 `MacroTiming.evaluate` 得到 prev_score, 供骤降检测. 保证幂等且无状态漂移
+  - **信号幂等**: `signal_id = 交易日 YYYYMMDD × 1000 + 当日序号` 确定性生成, `DuckDBManager.upsert_signals` 以 ON CONFLICT 更新, 同日重跑无重复行; `get_latest_signals(before_date=run_date)` 取昨日目标权重做 BUY/SELL/HOLD 对比, 同日信号不参与对比
+  - **风控二次优化**: 止损剔除或宏观骤降触发时, 用幸存标的 + 有效仓位上限重跑组合优化, 并保留原始 forced_exits 名单供信号归因
+  - **调仓防抖**: `risk_management.turnover_threshold` (15%) 应用于信号层 — 目标权重变动 < 阈值时维持昨日目标 (HOLD), 避免无效调仓
+- **影响范围**: `src/orchestration/daily_pipeline.py`, `src/data_pipeline/duckdb_manager.py` (新增 upsert_signals/get_latest_signals); T0.8 notifier 应直接消费 `PipelineResult.summary()` 与 `trade_signals.trigger_reason`; T0.9 回测循环应复用同一信号语义
+- **后续动作**: T0.8 从 `trade_signals` 表读取最新信号推送; 若未来持仓数 > 1000/日需调整 SIGNAL_ID_DATE_FACTOR
+
+### EV-010 — Windows GBK 控制台 emoji 崩溃 🟡
+
+- **日期**: 2025-07-24
+- **类型**: 新增约束
+- **与 task.md 关系**: 互补
+- **描述**: `uv run daily` 全流程跑通后在 `print(result.summary())` 处抛 `UnicodeEncodeError: 'gbk' codec can't encode character '✅'` — risk_manager.py 的风控摘要含 emoji (✅/⚠️/🛑), Windows GBK 控制台无法编码. 修复: `main()` 中 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`. 注意: logging (stderr) 不受影响但 GBK 终端显示为乱码, 属已知显示问题
+- **影响范围**: 所有 CLI 入口 (`daily`, 未来 `backtest`/notifier 调试脚本); 新增 CLI 若 print 含 emoji 的中文摘要必须做同样处理
+- **后续动作**: T0.8 notifier 推送走 HTTP 不受控制台编码影响; 若日后要彻底消除终端乱码, 可在 logging 配置中统一 `errors="replace"` 的 StreamHandler
+
+### EV-011 — 组合优化 Top-N 截断导致总权重低于仓位上限 (观察)
+
+- **日期**: 2025-07-24
+- **类型**: 发现依赖 / 技术债务
+- **与 task.md 关系**: 互补
+- **描述**: 真实冒烟运行发现: 19 只标的通过清洗后, 逆波动率权重 × cap(27.5%) 再经 max_positions=5 截断, 总权重仅 16.6% (< 27.5%) — 截断发生在归一化之后, 被截掉标的的权重直接丢失而非再分配. 这是 T0.5 的既有行为 (43 tests 通过, 属设计内), 但在大标的池 + 低 cap 场景下仓位利用率明显偏低
+- **影响范围**: `src/strategies/portfolio_optimizer.py::_apply_caps`; P0 信号偏保守 (少建仓, 方向正确)
+- **后续动作**: P1 升级风险平价 (T1.7) 时评估"先截断 Top-N 再归一化"或"截断后再分配剩余权重"; P0 不改动已测试行为
+
 ### EV-006 — P0 NAV/IOPV 数据尚未入库
 
 - **日期**: 2025-07-18
@@ -132,6 +169,36 @@
 - **描述**: T0.4 标的清洗模块的溢价检查需要 NAV/IOPV 数据, 但 T0.1 仅拉取了 OHLCV 日线数据 (akshare `fund_etf_hist_em` 可提供 `unit_nav` 字段但未使用)。当前溢价检查设计为: 若提供 NAV 数据则执行溢价过滤, 否则静默跳过。不影响其他 3 项筛选 (成交量/上市天数/集中度) 的正常运行。
 - **影响范围**: T0.7 daily_pipeline 串联时, 若需要完整的溢价检查, 需在数据拉取步骤中增加 NAV 数据获取
 - **后续动作**: P0 后期评估是否需要为溢价检查扩展数据拉取; 或延至 P1 因子计算时一并解决
+
+### EV-012 — T0.8 消息推送模块 (PushPlus) 与 token 安全策略
+
+- **日期**: 2026-09-11
+- **类型**: 关键设计决策 / 新增约束
+- **与 task.md 关系**: 互补 (T0.8 实现细节)
+- **描述**: T0.8 notifier 的核心决策与验收事实:
+  - **消息四要素**: `build_message()` 纯函数生成标题+正文, 每条信号含标的 (代码+名称)/方向/目标仓位/触发原因; 非 HOLD 信号独立分节, HOLD 折叠至 "维持原仓" 节; 全 HOLD 时标题标 "无操作" 但仍推送 (每日存活确认)
+  - **重试语义**: 与 fetcher `max_retries` 一致 — 总尝试次数 = `notification.retry_count` (3 次含首次), 指数退避 1s/2s; 网络异常与 PushPlus 业务码 ≠ 200 统一重试
+  - **推送失败不回滚**: `push_pipeline_result` 永不抛异常, 返回 `PushResult(ok/attempts/error)`; daily CLI 只告警, 不改变退出码 (信号已落库, 推送是尽力而为)
+  - **token 安全**: `config/settings.yaml` 被 git 跟踪, 真实 token 不落盘 — 验收用 `PUSHPLUS_TOKEN` 环境变量注入; 解析优先级 settings > 环境变量
+  - **代理绕过**: PushPlus 请求 `trust_env=False`, 绕过 Windows 不可达系统代理 (沿用 EV-004 教训)
+  - **验收**: 2026-09-11 `PUSHPLUS_TOKEN=xxx uv run daily` 真实推送, PushPlus 返回 code=200 (尝试 1/3); 全量测试 206/206 通过
+- **影响范围**: `src/orchestration/notifier.py`, `tests/test_notifier.py` (22 tests), `daily_pipeline.py::main` 增 `_push_signals()`; P0 Gate "闭环验收" "信号可追溯" 由本条闭环
+- **后续动作**: T0.10 dashboard 可参考推送格式; 若需 token 持久化, 需先与用户确认 (settings.yaml 加 .gitignore 或本地凭证文件)
+
+### EV-013 — 自研回测循环 v0.1 设计决策与成本口径确认 (T0.9)
+
+- **日期**: 2026-09-13
+- **类型**: 关键设计决策 / settings 参数变更
+- **与 task.md 关系**: 互补 (T0.9 实现细节)
+- **描述**: T0.9 回测引擎的核心决策与验收事实:
+  - **成本口径 (用户拍板)**: 原三方不一致 — settings `commission_bps: 0.15` + 注释"万分之1.5" + CLAUDE §5.2"双边佣金 ≥0.15%" — 用户确认采用 **round-trip 0.15% = 单边 0.075%**; 滑点维持宪法公式 max(0.15%/笔, 金额/20日均额×0.5%); settings trading_cost 段重构为无歧义字段 (commission_rate=0.00075 等), 新增 backtest.initial_cash=100000
+  - **撮合时序**: 信号 T 日收盘生成 → T+1 开盘价成交 (禁 T 日收盘价); 卖出先于买入 (卖出资金当日可用); 整手 100 份; 现金不足自动缩减 (不超买, cash ≥ 0)
+  - **T+0/T+1 语义 (用户确认)**: 买入份额按 settlement_type 解锁 (T+0 当日 / T+1 次日), 成交记录携 settlement_date; 锁定期卖单顺延至解锁日开盘执行
+  - **防未来函数细节**: 滑点用的 20 日均成交额以 shift(1) 计算, 仅含 T-1 及之前数据
+  - **验收基准 (用户确认)**: "与指数实际走势偏差 <1%" 采用 ETF 自身价格序列为基准 (纯验证引擎记账正确性, 不含跟踪误差); 同口径对比: 信号次日开盘买入 → 期末收盘
+  - **验收结果**: 510300 买入持有 2019-01-02 → 2026-09-11, 年化 5.75% vs 基准 5.80%, **偏差 0.044% < 1%** ✓; 510300(T+1) 与 513100(T+0) 同日买入交收日相差 1 个交易日 ✓; 摩擦成本 224 元/单边全仓 (佣金 74.76 + 滑点 149.29); 20 tests; 全量 226/226 通过
+- **影响范围**: `src/backtest/custom_loop.py`, `tests/test_custom_loop.py`, `config/settings.yaml` (trading_cost 重构 + backtest 段); P0 Gate "回测正确性" "T+0/T+1 正确性" 由本条闭环 → P0 Gate 6/6
+- **后续动作**: T1.9 vectorbt 对照 (相关系数 > 0.9999) 时复用本引擎验收口径; P1 若引入真实指数数据可加 "vs 000300" 参考报告; 回测接入 daily_pipeline 信号回放留待 P1
 
 ---
 
@@ -144,7 +211,7 @@
 | 因子注册表 (空)                      | `config/factor_registry.yaml`                   | P0    | ✅ 待 P1-D1 填充             |
 | 任务路线图                           | `docs/task.md`                                  | P0    | ✅ T0.1 已完成               |
 | Akshare 双源获取 (Sina + eastmoney)  | `src/data_pipeline/fetchers/akshare_fetcher.py` | P0    | ✅ Sina 主力, eastmoney 备用 |
-| DuckDB 数据库 (19 ETFs, 33,313 rows) | `data/quant_pilot.duckdb`                       | P0    | ✅ 全量历史数据已入库        |
+| DuckDB 数据库 (19 ETFs, 34,073 rows) | `data/quant_pilot.duckdb`                       | P0    | ✅ 全量历史数据已入库        |
 | DuckDB 管理器 (6 表 + UPSERT)        | `src/data_pipeline/duckdb_manager.py`           | P0    | ✅                           |
 | DuckDB 单元测试 (14 tests)           | `tests/test_duckdb_manager.py`                  | P0    | ✅ 全部通过                  |
 | 数据质量护栏 (5 项检查)              | `src/data_pipeline/processors/validator.py`     | P0    | ✅                           |
@@ -156,6 +223,12 @@
 | 组合优化测试 (43 tests)              | `tests/test_portfolio_optimizer.py`             | P0    | ✅ 全部通过                  |
 | 风控模块 (ATR + 骤降)               | `src/strategies/risk_manager.py`                | P0    | ✅                           |
 | 风控测试 (41 tests)                  | `tests/test_risk_manager.py`                    | P0    | ✅ 全部通过                  |
+| 每日主流程 (五层漏斗串联)            | `src/orchestration/daily_pipeline.py`           | P0    | ✅ 🆕                        |
+| 主流程集成测试 (6 tests)             | `tests/test_daily_pipeline.py`                  | P0    | ✅ 全部通过 🆕               |
+| 消息推送模块 (PushPlus)              | `src/orchestration/notifier.py`                 | P0    | ✅ 真实推送 🆕               |
+| 推送单元测试 (22 tests)              | `tests/test_notifier.py`                        | P0    | ✅ 全部通过 🆕               |
+| 自研回测引擎 (T+0/T+1 撮合)          | `src/backtest/custom_loop.py`                   | P0    | ✅ 偏差 0.044% 🆕            |
+| 回测测试 (20 tests)                  | `tests/test_custom_loop.py`                     | P0    | ✅ 全部通过 🆕               |
 
 ---
 
@@ -177,9 +250,11 @@
 5. ~~数据源修复: Sina 迁移 + 全量导入~~ (已完成 — EV-007, EV-008)
 6. ~~T0.5: 组合优化模块~~ (已完成)
 7. ~~T0.6: 风控模块~~ (已完成)
-8. **当前**: 开始 **T0.7** — 每日盘后主流程编排 (串联全部漏斗)
-9. ✅ 全量数据已入库: 19 ETFs, 33,313 rows (DuckDB)
-10. ✅ 全量测试: 178/178 通过
-11. 📋 五层漏斗已就绪: macro_timing → universe_filter → portfolio_optimizer → risk_manager
-12. 📋 T0.7 依赖 T0.2-T0.6 全部模块; 需编排数据拉取→质检→择时→清洗→优化→风控→信号
-13. 参考: `docs/task.md` → P0 T0.7; `docs/spec.md` §3 编排层
+8. ~~T0.7: 每日盘后主流程编排~~ (已完成 — EV-009; `uv run daily` 真实冒烟通过, 2.1s 全流程, 信号幂等落库)
+9. ~~T0.8: 消息推送模块~~ (已完成 — EV-012; 2026-09-11 真实推送 PushPlus code=200, 22 tests)
+10. ~~T0.9: 自研回测循环 v0.1~~ (已完成 — EV-013; 偏差 0.044% < 1%, 交收差一天 ✓, 20 tests)
+11. **当前**: 开始 **T0.10** — Streamlit 单页面信号面板 (`dashboard/app.py`, 今日信号+触发原因+持仓+净值; streamlit 在 pyproject 的 p1 optional-deps 组)
+12. ✅ 全量数据已入库: 19 ETFs, 34,073 rows (DuckDB); 11 条真实信号 (最新 2026-09-11)
+13. ✅ 全量测试: 226/226 通过; P0 Gate 6/6 全通过
+14. 📋 运行提示: 推送需 `PUSHPLUS_TOKEN` 环境变量 (EV-012); 回测验收 `uv run backtest` (EV-013)
+15. 参考: `docs/task.md` → P0 T0.10; `docs/spec.md` §4.5 展示层

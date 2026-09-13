@@ -1,4 +1,5 @@
-# CLAUDE.md — Quant-Pilot 项目最高宪法
+
+# AGENTS.md — Quant-Pilot 项目最高宪法
 
 **定位**: 本文件是所有 Coding Agent 在此项目中必须遵守的最高行为准则。Agent 每次启动时应首先读取本文件。（或者可能叫AGENTS.md 两者代指同一个文件）
 

@@ -48,23 +48,23 @@
   - 依赖: T0.3（需要宏观得分）
   - 验收: 41/41 测试通过; ATR Wilder 平滑正确; 上涨行情不触发止损; 暴跌触发止损; 止损棘轮只上移; 骤降仓位降至 30%
 
-- [ ] **T0.7** — 每日盘后主流程编排 — 预计: 5-7h
-  - 产出: `src/orchestration/daily_pipeline.py`
-  - 内容: 串联数据拉取 → 数据质检 → 宏观择时 → 标的清洗 → 组合优化 → 风控检查 → 生成信号，每步记录日志和耗时
+- [x] **T0.7** — 每日盘后主流程编排 — 预计: 5-7h (实际: ~2h)
+  - 产出: `src/orchestration/daily_pipeline.py`、`tests/test_daily_pipeline.py` (6 tests)、`duckdb_manager.py` 新增 upsert_signals/get_latest_signals
+  - 内容: 9 步串联 — 增量拉取(回溯10天缓冲) → 质检(阻断级抛 DataQualityError) → 幂等入库 → 宏观择时(截断重算前日得分) → 标的清洗 → 组合优化 → 风控(止损剔除+骤降, 二次优化) → 信号生成(昨日权重对比, 15% 防抖, 多层归因) → 确定性 signal_id 幂等落库; 每步记录耗时
   - 依赖: T0.2, T0.3, T0.4, T0.5, T0.6
-  - 验收: 在任一交易日盘后运行 `daily_pipeline.py`，从拉取到信号生成全流程无报错；日志记录完整
+  - 验收: 6/6 集成测试通过(含幂等重跑/脏数据阻断/无未来函数); `uv run daily` 真实冒烟 EXIT=0, 全流程 2.1s, 日志完整, 首条真实信号落库 (159920 BUY 27.5%)
 
-- [ ] **T0.8** — 消息推送模块 — 预计: 3-4h
-  - 产出: `src/orchestration/notifier.py`
-  - 内容: 至少支持一种推送通道（PushPlus/飞书/邮件）；推送内容包含：标的、方向、目标仓位、触发原因（多层级归因）；推送失败重试 3 次
+- [x] **T0.8** — 消息推送模块 — 预计: 3-4h (实际: ~2h)
+  - 产出: `src/orchestration/notifier.py`、`tests/test_notifier.py` (22 tests)
+  - 内容: PushPlus 通道；推送含标的/方向/目标仓位/触发原因四要素（非 HOLD 单独分节）；失败重试 3 次（指数退避）；token 未配置安全跳过；daily CLI 集成（推送失败不影响信号落库与退出码）
   - 依赖: T0.7
-  - 验收: 运行 pipeline 后手机收到信号推送；推送内容包含触发原因
+  - 验收: 2026-09-11 真实推送 PushPlus code=200（尝试 1/3）；推送内容含四要素 ✅
 
-- [ ] **T0.9** — 自研轻量回测循环 v0.1 — 预计: 8-10h
-  - 产出: `src/backtest/custom_loop.py`
-  - 内容: 标的元数据驱动撮合（T+0/T+1 区分）、动态仓位上限、T+1 开盘价成交、双边佣金 ≥ 0.15% + 滑点（max(0.15%, 交易额/日均成交额 × 0.5%)）、每日净值记录
+- [x] **T0.9** — 自研轻量回测循环 v0.1 — 预计: 8-10h (实际: ~3h)
+  - 产出: `src/backtest/custom_loop.py`、`tests/test_custom_loop.py` (20 tests)
+  - 内容: T+1 开盘价成交（信号 T 日收盘生成）；单边佣金 0.075%（round-trip 0.15%，用户确认口径）+ 每笔滑点 max(0.15%, 金额/20日均额×0.5%)；T+0/T+1 元数据路由（交收日 + 锁定顺延）；动态仓位上限；整手 100 份；每日净值记录
   - 依赖: T0.5, T0.6（需要组合优化和风控模块的接口）
-  - 验收: 对沪深300 ETF 单标的买入持有回测，净值曲线与指数实际走势年度收益率偏差 < 1%；分别对 T+1 ETF（510300）和 T+0 ETF（513100）回测，验证交收日期差一天
+  - 验收: 2026-09-13 `uv run backtest` — 510300 买入持有年化 vs 自身价格基准偏差 **0.044% < 1%**（基准口径经用户确认）；510300(T+1) 与 513100(T+0) 交收日相差 1 个交易日 ✅
 
 - [ ] **T0.10** — Streamlit 单页面信号面板 — 预计: 4-6h
   - 产出: `dashboard/app.py`
@@ -74,27 +74,27 @@
 
 ### 交付物
 
-- [ ] `src/data_pipeline/duckdb_manager.py` — DuckDB 交互层
-- [ ] `src/data_pipeline/fetchers/akshare_fetcher.py` — Akshare 数据获取
-- [ ] `src/data_pipeline/processors/cleaner.py` — 数据清洗与质量护栏
-- [ ] `src/data_pipeline/processors/validator.py` — Schema 与时间戳校验
-- [ ] `src/strategies/macro_timing.py` — 宏观择时（维度①②）
-- [ ] `src/strategies/universe_filter.py` — 标的清洗
-- [ ] `src/strategies/portfolio_optimizer.py` — 波动率倒数加权
-- [ ] `src/strategies/risk_manager.py` — ATR 止损 + 强制减仓
-- [ ] `src/orchestration/daily_pipeline.py` — 每日主流程
-- [ ] `src/orchestration/notifier.py` — 消息推送
-- [ ] `src/backtest/custom_loop.py` — 自研回测循环
+- [x] `src/data_pipeline/duckdb_manager.py` — DuckDB 交互层
+- [x] `src/data_pipeline/fetchers/akshare_fetcher.py` — Akshare 数据获取
+- [x] `src/data_pipeline/processors/cleaner.py` — 数据清洗与质量护栏（功能已由 validator.py 合并覆盖，2026-09-13 用户确认）
+- [x] `src/data_pipeline/processors/validator.py` — Schema 与时间戳校验
+- [x] `src/strategies/macro_timing.py` — 宏观择时（维度①②）
+- [x] `src/strategies/universe_filter.py` — 标的清洗
+- [x] `src/strategies/portfolio_optimizer.py` — 波动率倒数加权
+- [x] `src/strategies/risk_manager.py` — ATR 止损 + 强制减仓
+- [x] `src/orchestration/daily_pipeline.py` — 每日主流程
+- [x] `src/orchestration/notifier.py` — 消息推送 (PushPlus, 四要素归因, 重试 3 次)
+- [x] `src/backtest/custom_loop.py` — 自研回测循环 (T+0/T+1 撮合 + 摩擦成本 + 动态仓位)
 - [ ] `dashboard/app.py` — Streamlit 信号面板
 
 ### 验收标准 (Gate Criteria)
 
-- [ ] **闭环验收**: 在任一交易日盘后运行 `daily_pipeline.py`，从 Akshare 拉取 → 宏观打分 → 信号生成 → 推送到手机，全流程无报错
-- [ ] **回测正确性**: 自研回测循环对沪深300 ETF 单标的买入持有，净值曲线与指数实际走势年度收益率偏差 < 1%
-- [ ] **T+0/T+1 正确性**: 分别对 T+1 ETF（510300）和 T+0 ETF（513100）回测，交收日期差一天
-- [ ] **数据护栏有效**: 手动注入单日涨跌幅 25% 脏数据 → pipeline 阻断并报警
-- [ ] **信号可追溯**: 任意信号推送中，用户能读到"因为什么触发、建议做什么、仓位多少"
-- [ ] **无未来函数**: `tests/` 中至少一个测试用例验证 T 日计算不依赖 T+1 及以后数据
+- [x] **闭环验收**: 2026-09-11 `uv run daily` 全流程 EXIT=0，信号真实推送手机（PushPlus code=200）
+- [x] **回测正确性**: 2026-09-13 510300 买入持有年化偏差 0.044% < 1%（基准=ETF 自身价格序列，用户确认口径）
+- [x] **T+0/T+1 正确性**: 2026-09-13 510300(T+1) 与 513100(T+0) 交收日期相差 1 个交易日
+- [x] **数据护栏有效**: 手动注入单日涨跌幅 25% 脏数据 → pipeline 阻断并报警
+- [x] **信号可追溯**: 推送含标的/方向/目标仓位/触发原因四要素（2026-09-11 真实推送验证）
+- [x] **无未来函数**: `tests/` 中至少一个测试用例验证 T 日计算不依赖 T+1 及以后数据
 
 ---
 
@@ -269,4 +269,4 @@
 
 ---
 
-*基于 spec.md v2.0 §7 Phase Plan 创建 | 最后更新: 2025-07-18*
+*基于 spec.md v2.0 §7 Phase Plan 创建 | 最后更新: 2026-09-13*

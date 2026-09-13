@@ -1,4 +1,3 @@
-复权fu'q
 
 # Quant-Pilot 项目总体规划 (Project Specification) — v2.0
 

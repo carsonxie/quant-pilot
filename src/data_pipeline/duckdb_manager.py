@@ -334,6 +334,104 @@ class DuckDBManager:
         columns = [desc[0] for desc in self.conn.description]
         return pl.DataFrame(result, schema=columns, orient="row")
 
+    def upsert_signals(self, df: pl.DataFrame) -> int:
+        """插入或更新交易信号 (幂等).
+
+        以 signal_id 为主键 (调用方需生成确定性 ID,
+        如 signal_id = 交易日期 YYYYMMDD * 1000 + 当日序号),
+        重复执行相同日期的 pipeline 不产生重复行.
+
+        Args:
+            df: Polars DataFrame, 需包含:
+                signal_id, signal_date, symbol, direction,
+                target_weight, trigger_reason
+
+        Returns:
+            实际写入行数
+
+        Raises:
+            ValueError: 缺少必需列
+        """
+        if df.is_empty():
+            logger.warning("upsert_signals: empty DataFrame, skipping")
+            return 0
+
+        required = {
+            "signal_id", "signal_date", "symbol",
+            "direction", "target_weight", "trigger_reason",
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Signals DataFrame missing required columns: {missing}. "
+                f"Got: {sorted(df.columns)}"
+            )
+
+        pdf = df.to_pandas()
+        self.conn.register("_upsert_signals", pdf)
+
+        try:
+            self.conn.execute("""
+                INSERT INTO trade_signals
+                    (signal_id, signal_date, symbol, direction,
+                     target_weight, trigger_reason)
+                SELECT
+                    signal_id, signal_date, symbol, direction,
+                    target_weight, trigger_reason
+                FROM _upsert_signals
+                ON CONFLICT (signal_id) DO UPDATE SET
+                    signal_date    = EXCLUDED.signal_date,
+                    symbol         = EXCLUDED.symbol,
+                    direction      = EXCLUDED.direction,
+                    target_weight  = EXCLUDED.target_weight,
+                    trigger_reason = EXCLUDED.trigger_reason
+            """)
+        finally:
+            self.conn.unregister("_upsert_signals")
+
+        row_count = len(df)
+        logger.info("upsert_signals: %d rows written", row_count)
+        return row_count
+
+    def get_latest_signals(
+        self,
+        before_date: Optional[str] = None,
+    ) -> pl.DataFrame:
+        """查询最近一个信号日的全部信号.
+
+        Args:
+            before_date: 若提供 (格式 "YYYY-MM-DD"),
+                仅考虑该日期之前的信号日 (用于与昨日信号对比)
+
+        Returns:
+            Polars DataFrame, 列同 trade_signals 表; 无信号时返回空表
+        """
+        if not self.table_exists("trade_signals"):
+            return pl.DataFrame()
+
+        if before_date:
+            row = self.conn.execute(
+                "SELECT MAX(signal_date) FROM trade_signals WHERE signal_date < ?",
+                [before_date],
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT MAX(signal_date) FROM trade_signals"
+            ).fetchone()
+
+        if row is None or row[0] is None:
+            return pl.DataFrame()
+
+        result = self.conn.execute(
+            "SELECT * FROM trade_signals WHERE signal_date = ? ORDER BY symbol",
+            [row[0]],
+        ).fetchall()
+        if not result:
+            return pl.DataFrame()
+
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
     def get_etf_metadata(
         self,
         symbols: Optional[list[str]] = None,

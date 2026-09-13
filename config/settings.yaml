@@ -63,13 +63,19 @@ universe:
     - {symbol: "513050", name: "中概互联ETF",       market_type: "跨境", settlement: "T+0"}
 
 # --- 交易成本 (实盘与回测必须一致) ---
+# 口径确认 (2026-09-11, 用户拍板): 佣金 round-trip 0.15% = 单边 0.075%;
+# 滑点 = max(0.15%/笔, 交易金额/日均成交额 × 0.5%), 买卖每笔分别计
 trading_cost:
-  commission_bps: 0.15          # 双边佣金 (万分之1.5)
+  commission_rate: 0.00075      # 单边佣金率 (round-trip 0.15%)
   min_commission_per_trade: 0.0 # 最低佣金 (ETF 免最低佣金)
-  slippage_base_bps: 0.15       # 基础滑点 (万分之1.5)
-  impact_formula: "max(0.0015, trade_amount / avg_daily_amount * 0.005)"
-  # 滑点 = max(0.15%, 交易金额/日均成交额 × 0.5%)
+  slippage_base: 0.0015         # 基础滑点下限 (0.15%/笔)
+  impact_coefficient: 0.005     # 冲击项系数 (交易金额/日均成交额 × 0.5%)
+  slippage_lookback_days: 20    # 日均成交额回看窗口 (交易日)
   stamp_duty: 0.0               # ETF 免印花税
+
+# --- 回测 (T0.9) ---
+backtest:
+  initial_cash: 100000.0        # 初始资金 (元; 资金体量 <10万)
 
 # --- 宏观择时 (第一层漏斗) ---
 macro_timing:
