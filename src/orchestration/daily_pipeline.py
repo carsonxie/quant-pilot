@@ -5,10 +5,12 @@
   2. 数据质检  — 阻断级问题 (负价格/单日涨跌幅>20%) 直接抛 DataQualityError 终止
   3. 幂等入库  — UPSERT OHLCV + ETF 元数据
   4. 宏观择时  — 当日得分; 截断一日重算前日得分 (供骤降检测, 无状态)
-  5. 标的清洗  — 流动性/上市天数/溢价 (NAV 缺失时静默跳过)
-  6. 组合优化  — 波动率倒数加权, 归一化到仓位上限
-  7. 风控执行  — ATR 止损剔除 + 宏观骤降压仓位, 触发时二次优化
-  8. 信号生成  — 与昨日目标权重对比定 BUY/SELL/HOLD (turnover_threshold 防抖)
+  5. 标的清洗  — 流动性/上市天数/溢价 (NAV 缺失记为 unknown, 不静默跳过, C10)
+  6. 组合优化  — 按配置方法加权; scope=a_share 时宏观上限只约束 A 股合计,
+                  非A (跨境/商品) 用独立上限, 不因 A 股信号被清零 (spec §5.2, C11)
+  7. 风控执行  — ATR 止损剔除 + 宏观骤降压舱位, 触发时二次优化
+  8. 信号生成  — 与昨日目标权重对比定 BUY/SELL/HOLD; 防抖仅约束常规调整,
+                 明确退出(清零)/止损/骤降减仓不受防抖压制 (spec §5.4/§5.5, C04)
   9. 信号落库  — 确定性 signal_id, 重复运行幂等
 
 Usage:
@@ -61,14 +63,25 @@ class Signal:
     trigger_reason: str   # 多层级归因
 
 
+# 加权方法 → 中文标签 (信号归因可读性; C01: 算法标识与行为一致)
+_METHOD_CN = {
+    "inverse_volatility": "波动率倒数(1/σ)",
+    "inverse_variance": "方差倒数(1/σ²)",
+}
+
+
 @dataclass
 class PipelineResult:
     """每日主流程运行结果."""
 
     run_date: str                            # 信号日期 (最新交易日, ISO 格式)
+    mode: str = "research"                   # 运行模式 (spec §10.1: research/paper/real)
+    strategy_version: str = "unversioned"    # 策略版本 (settings.project.strategy_version)
+    macro_scope: str = "a_share"             # 宏观信号作用域 (a_share | all_composite)
     macro_score: Optional[MacroScore] = None
     prev_macro_score: float = 50.0
     passed_symbols: list[str] = field(default_factory=list)
+    universe_unknown: dict[str, list[str]] = field(default_factory=dict)
     portfolio: Optional[portfolio_optimizer.PortfolioResult] = None
     risk_report: Optional[risk_manager.RiskReport] = None
     signals: list[Signal] = field(default_factory=list)
@@ -77,14 +90,23 @@ class PipelineResult:
     def summary(self) -> str:
         """人类可读摘要 (供日志与未来 notifier 使用)."""
         lines = [f"===== Quant-Pilot 每日信号 ({self.run_date}) ====="]
+        lines.append(
+            f"[模式] {self.mode} | 策略版本 {self.strategy_version} | "
+            f"数据截止 {self.run_date} | 宏观scope {self.macro_scope}"
+        )
 
         if self.macro_score is not None:
             lines.append(f"[宏观择时] {self.macro_score.summary()}")
 
-        lines.append(
+        clean_line = (
             f"[标的清洗] {len(self.passed_symbols)} 只通过: "
             f"{', '.join(self.passed_symbols) if self.passed_symbols else '(无)'}"
         )
+        if self.universe_unknown:
+            clean_line += (
+                f" | {len(self.universe_unknown)} 只 unknown (NAV缺失, 待核验; 完整禁买规则见 M3)"
+            )
+        lines.append(clean_line)
 
         if self.portfolio is not None:
             lines.append(f"[组合优化]\n{self.portfolio.summary()}")
@@ -173,11 +195,20 @@ def run_daily_pipeline(
         timings["universe_filter"] = time.perf_counter() - t0
         logger.info("标的清洗:\n%s", filter_result.summary())
 
-        # ---- Step 6: 组合优化 ----
+        # ---- Step 6: 组合优化 (按宏观 scope 分桶: A股 / 非A) ----
         t0 = time.perf_counter()
         optimizer = portfolio_optimizer.from_settings(settings)
-        portfolio = _step_optimize(optimizer, ohlcv, filter_result.passed,
-                                   score.position_cap)
+        scope = str(settings.get("macro_timing", {}).get("scope", "a_share"))
+        non_a_cap = float(
+            settings.get("portfolio", {}).get("non_a_share_max_total", 0.30)
+        )
+        market_types = {
+            etf["symbol"]: etf.get("market_type", "A股") for etf in universe_etfs
+        }
+        portfolio = _step_optimize_scoped(
+            optimizer, ohlcv, filter_result.passed,
+            score.position_cap, non_a_cap, market_types, scope,
+        )
         timings["portfolio_optimize"] = time.perf_counter() - t0
 
         # ---- Step 7: 风控执行 ----
@@ -187,6 +218,10 @@ def run_daily_pipeline(
             rm, optimizer, ohlcv, portfolio,
             current_score=score.composite_score,
             prev_score=prev_score,
+            a_cap=score.position_cap,
+            non_a_cap=non_a_cap,
+            market_types=market_types,
+            scope=scope,
         )
         timings["risk_control"] = time.perf_counter() - t0
         logger.info("风控执行: %s", risk_report.message)
@@ -207,11 +242,16 @@ def run_daily_pipeline(
         _step_persist_signals(db, signals, run_date)
         timings["signal_persist"] = time.perf_counter() - t0
 
+        project_cfg = settings.get("project", {})
         result = PipelineResult(
             run_date=run_date,
+            mode=str(project_cfg.get("mode", "research")),
+            strategy_version=str(project_cfg.get("strategy_version", "unversioned")),
+            macro_scope=scope,
             macro_score=score,
             prev_macro_score=prev_score,
             passed_symbols=filter_result.passed,
+            universe_unknown=filter_result.unknown,
             portfolio=portfolio,
             risk_report=risk_report,
             signals=signals,
@@ -264,10 +304,21 @@ def _step_update_data(
         logger.warning("本次未拉到新数据 (可能非交易日), 沿用库内数据继续")
         return 0
 
-    # 质检: 阻断级问题抛 DataQualityError 终止流程
+    # 质检: 阻断级问题抛 DataQualityError 终止流程 (产品感知涨跌幅, C10)
     historical = db.get_ohlcv(symbols=symbols)
     stats = compute_historical_stats(historical)
-    issues = validate_ohlcv(new_df, historical_stats=stats)
+    dq_cfg = settings.get("data_quality", {}).get("daily_change", {})
+    limits = {
+        sym: float(pct) / 100.0
+        for sym, pct in dq_cfg.get("limit_overrides_pct", {}).items()
+    }
+    issues = validate_ohlcv(
+        new_df,
+        historical_stats=stats,
+        price_limits=limits,
+        default_price_limit=float(dq_cfg.get("default_limit_pct", 10.0)) / 100.0,
+        price_limit_buffer=float(dq_cfg.get("review_buffer_pct", 2.0)) / 100.0,
+    )
     criticals = [i for i in issues if i.severity == "critical"]
     if criticals:
         raise DataQualityError(criticals)
@@ -332,11 +383,12 @@ def _step_optimize(
     symbols: list[str],
     position_cap: float,
 ) -> portfolio_optimizer.PortfolioResult:
-    """对通过清洗的标的执行波动率倒数加权."""
+    """按配置的加权方法 (inverse_volatility / inverse_variance) 优化目标组合."""
     if not symbols or position_cap <= 0:
         logger.info("无可优化标的或仓位上限为 0 (cap=%.2f), 目标空仓", position_cap)
         return portfolio_optimizer.PortfolioResult(
             weights=[], position_cap=position_cap, total_weight=0.0,
+            method=optimizer.method,
             num_symbols_input=len(symbols), num_symbols_output=0,
         )
 
@@ -344,6 +396,76 @@ def _step_optimize(
     portfolio = optimizer.optimize(candidates, position_cap=position_cap)
     logger.info("组合优化:\n%s", portfolio.summary())
     return portfolio
+
+
+def _empty_portfolio(method: str) -> portfolio_optimizer.PortfolioResult:
+    """空分桶结果."""
+    return portfolio_optimizer.PortfolioResult(
+        weights=[], position_cap=0.0, total_weight=0.0, method=method,
+        num_symbols_input=0, num_symbols_output=0,
+    )
+
+
+def _merge_portfolio_results(
+    a: portfolio_optimizer.PortfolioResult,
+    b: portfolio_optimizer.PortfolioResult,
+    method: str,
+    total_cap: float,
+    n_input: int,
+) -> portfolio_optimizer.PortfolioResult:
+    """合并两个分桶结果 (权重降序; position_cap = 两桶上限之和)."""
+    weights = sorted(
+        a.weights + b.weights, key=lambda w: w.final_weight, reverse=True,
+    )
+    vols = [w.annualized_vol for w in weights]
+    return portfolio_optimizer.PortfolioResult(
+        weights=weights,
+        position_cap=round(total_cap, 6),
+        total_weight=round(sum(w.final_weight for w in weights), 6),
+        method=method,
+        vol_lookback=a.vol_lookback,
+        max_position_weight=a.max_position_weight,
+        num_symbols_input=n_input,
+        num_symbols_output=len(weights),
+        min_annual_vol=min(vols) if vols else None,
+        max_annual_vol=max(vols) if vols else None,
+    )
+
+
+def _step_optimize_scoped(
+    optimizer: portfolio_optimizer.PortfolioOptimizer,
+    ohlcv: pl.DataFrame,
+    symbols: list[str],
+    a_share_cap: float,
+    non_a_cap: float,
+    market_types: dict[str, str],
+    scope: str = "a_share",
+) -> portfolio_optimizer.PortfolioResult:
+    """按宏观信号 scope 生成目标组合 (spec §5.2, C11).
+
+    - scope="a_share" (默认): 宏观舱位上限只约束 A 股合计; 非 A (跨境/商品)
+      用独立上限 min(non_a_share_max_total, 1 − A股合计), 不因 A 股信号清零.
+    - scope="all_composite": 显式研究版本 — 宏观上限约束全部资产 (v0.1 旧行为).
+    """
+    if scope != "a_share":
+        return _step_optimize(optimizer, ohlcv, symbols, a_share_cap)
+
+    a_symbols = [s for s in symbols if market_types.get(s, "A股") == "A股"]
+    non_symbols = [s for s in symbols if market_types.get(s, "A股") != "A股"]
+
+    res_a = _step_optimize(optimizer, ohlcv, a_symbols, a_share_cap)
+    if non_symbols:
+        remaining = max(0.0, 1.0 - res_a.total_weight)
+        eff_non_cap = min(non_a_cap, remaining)
+        res_non = _step_optimize(optimizer, ohlcv, non_symbols, eff_non_cap)
+    else:
+        eff_non_cap = 0.0
+        res_non = _empty_portfolio(optimizer.method)
+
+    return _merge_portfolio_results(
+        res_a, res_non, optimizer.method,
+        total_cap=a_share_cap + eff_non_cap, n_input=len(symbols),
+    )
 
 
 # ------------------------------------------------------------------
@@ -357,40 +479,61 @@ def _step_risk_control(
     portfolio: portfolio_optimizer.PortfolioResult,
     current_score: float,
     prev_score: float,
+    a_cap: float | None = None,
+    non_a_cap: float = 0.0,
+    market_types: dict[str, str] | None = None,
+    scope: str = "a_share",
 ) -> tuple[portfolio_optimizer.PortfolioResult, risk_manager.RiskReport]:
     """ATR 止损 + 宏观骤降减仓.
 
-    若触发止损或骤降, 剔除止损标的并用有效仓位上限二次优化.
+    若触发止损或骤降, 剔除止损标的并用有效上限二次优化.
+    scope=a_share 时, 风控报告与骤降压舱均按 A 股口径 (非A由独立上限约束).
     """
+    # 风险报告使用的宏观舱位口径 (a_share scope 下即 A 股合计上限)
+    report_cap = (
+        a_cap if (scope == "a_share" and a_cap is not None)
+        else portfolio.position_cap
+    )
     held_symbols = [w.symbol for w in portfolio.weights]
     if not held_symbols:
         # 空仓场景仍需检测宏观骤降
         report = rm.evaluate(
             ohlcv.head(0), current_score, prev_score,
-            position_cap=portfolio.position_cap, symbols=[],
+            position_cap=report_cap, symbols=[],
         )
         return portfolio, report
 
     held_ohlcv = ohlcv.filter(pl.col("symbol").is_in(held_symbols))
     report = rm.evaluate(
         held_ohlcv, current_score, prev_score,
-        position_cap=portfolio.position_cap,
+        position_cap=report_cap,
     )
 
     need_rebalance = bool(report.forced_exits) or (
-        report.effective_position_cap < portfolio.position_cap
+        report.effective_position_cap < report_cap
     )
     if need_rebalance:
         original_exits = list(report.forced_exits)
         survivors = [s for s in held_symbols if s not in original_exits]
         logger.warning(
-            "风控触发再平衡: 剔除 %s, 仓位上限 %.2f → %.2f",
-            report.forced_exits, portfolio.position_cap,
-            report.effective_position_cap,
+            "风控触发再平衡: 剔除 %s, 舱位上限 %.2f → %.2f (scope=%s)",
+            report.forced_exits, report_cap,
+            report.effective_position_cap, scope,
         )
-        portfolio = _step_optimize(
-            optimizer, ohlcv, survivors, report.effective_position_cap,
-        )
+        if scope == "a_share" and market_types is not None:
+            portfolio = _step_optimize_scoped(
+                optimizer, ohlcv, survivors,
+                report.effective_position_cap, non_a_cap, market_types, scope,
+            )
+            scope_note = (
+                f" (宏观scope=A股: 上限 {report.effective_position_cap:.0%}; "
+                f"非A独立上限 {non_a_cap:.0%})"
+            )
+        else:
+            portfolio = _step_optimize(
+                optimizer, ohlcv, survivors, report.effective_position_cap,
+            )
+            scope_note = ""
         # 二次优化后刷新止损状态 (仓位变化不影响止损线, 但标的集可能变化)
         final_symbols = [w.symbol for w in portfolio.weights]
         report = rm.evaluate(
@@ -402,6 +545,8 @@ def _step_risk_control(
         )
         # 保留原始止损退出名单, 供信号归因使用
         report.forced_exits = original_exits
+        if scope_note:
+            report.message += scope_note
     return portfolio, report
 
 
@@ -418,9 +563,11 @@ def _step_generate_signals(
 ) -> list[Signal]:
     """对比新旧目标权重生成 BUY/SELL/HOLD 信号.
 
-    - |Δweight| < turnover_threshold → HOLD (防抖, 不触发调仓)
-    - 昨日有仓今日无 → SELL (清仓)
-    - 其余按权重增减定方向
+    规则 (spec §5.4/§5.5, C04: 普通调整规则不能压制风险或明确退出):
+      - 明确退出(目标清零)、止损剔除、宏观骤降减仓 → 无条件 SELL, 不受防抖压制
+      - 首次建仓 (prev=0 且 new>0) → BUY, 不因普通带宽永久跳过 (spec §5.4)
+      - 其余 |Δweight| < turnover_threshold → HOLD (维持昨日目标)
+      - 常规增加 → BUY; 常规减少 → SELL
     """
     new_weights = {w.symbol: w.final_weight for w in portfolio.weights}
 
@@ -429,24 +576,42 @@ def _step_generate_signals(
         for row in prev_signals.iter_rows(named=True):
             prev_weights[row["symbol"]] = float(row["target_weight"])
 
+    forced_exits = set(risk_report.forced_exits)
     all_symbols = sorted(set(new_weights) | set(prev_weights))
     signals: list[Signal] = []
 
     for sym in all_symbols:
         new_w = new_weights.get(sym, 0.0)
         prev_w = prev_weights.get(sym, 0.0)
-        delta = new_w - prev_w
+        raw_delta = new_w - prev_w
 
-        if abs(delta) < turnover_threshold:
+        # 风险/明确退出/首次建仓不受防抖约束 (留痕原因, 供归因)
+        bypass_reason: str | None = None
+        if raw_delta < 0.0:
+            if sym in forced_exits:
+                bypass_reason = "风险退出(止损)"
+            elif new_w <= 0.0:
+                bypass_reason = "明确退出(目标清零)"
+            elif risk_report.plunge_detected:
+                bypass_reason = "风险减仓(宏观骤降)"
+        elif raw_delta > 0.0 and prev_w <= 0.0:
+            bypass_reason = "首次建仓"
+
+        if raw_delta < 0.0 and bypass_reason is not None:
+            direction = "SELL"
+        elif raw_delta > 0.0 and bypass_reason is not None:
+            direction = "BUY"
+        elif abs(raw_delta) < turnover_threshold:
             direction = "HOLD"
             new_w = prev_w  # 维持昨日目标, 避免无效调仓
-        elif delta > 0:
+        elif raw_delta > 0.0:
             direction = "BUY"
         else:
             direction = "SELL"
 
         reason = _build_trigger_reason(
-            sym, direction, new_w, prev_w, portfolio, risk_report, score,
+            sym, direction, new_w, prev_w, raw_delta,
+            turnover_threshold, portfolio, risk_report, score, bypass_reason,
         )
         signals.append(Signal(
             symbol=sym, direction=direction,
@@ -462,18 +627,25 @@ def _build_trigger_reason(
     direction: str,
     new_w: float,
     prev_w: float,
+    raw_delta: float,
+    turnover_threshold: float,
     portfolio: portfolio_optimizer.PortfolioResult,
     risk_report: risk_manager.RiskReport,
     score: MacroScore,
+    bypass_reason: str | None,
 ) -> str:
     """构建多层级归因字符串 (信号可追溯)."""
     parts = [
         f"宏观{score.composite_score:.0f}分({score.regime},上限{score.position_cap:.0%})",
     ]
 
-    if symbol in {w.symbol for w in portfolio.weights}:
-        weight = next(w for w in portfolio.weights if w.symbol == symbol)
-        parts.append(f"逆波动率加权{weight.final_weight:.1%}(年化波动{weight.annualized_vol:.0%})")
+    weight = next((w for w in portfolio.weights if w.symbol == symbol), None)
+    if weight is not None:
+        method_cn = _METHOD_CN.get(portfolio.method, portfolio.method)
+        parts.append(
+            f"{method_cn}加权{weight.final_weight:.1%}"
+            f"(年化波动{weight.annualized_vol:.0%})"
+        )
     else:
         parts.append("未入选组合")
 
@@ -482,11 +654,15 @@ def _build_trigger_reason(
             f"宏观骤降{risk_report.plunge_score_drop:.0f}分,"
             f"仓位压至{risk_report.effective_position_cap:.0%}"
         )
-    if symbol in risk_report.forced_exits:
+    if symbol in set(risk_report.forced_exits):
         parts.append("ATR止损触发,强制退出")
+    if bypass_reason is not None:
+        parts.append(f"{bypass_reason}不受防抖限制")
 
     if direction == "HOLD":
-        parts.append(f"变动<{abs(new_w - prev_w):.1%}防抖阈值,维持原仓")
+        parts.append(
+            f"变动{abs(raw_delta):.1%}<防抖阈值{turnover_threshold:.0%},维持原仓"
+        )
     else:
         parts.append(f"{prev_w:.1%}→{new_w:.1%}")
 

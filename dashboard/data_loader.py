@@ -184,5 +184,6 @@ def load_macro_history(
             "composite_score": score.composite_score,
             "position_cap": score.position_cap,
             "regime": score.regime,
+            "breadth_pct": score.breadth_pct,
         })
     return pl.DataFrame(rows)

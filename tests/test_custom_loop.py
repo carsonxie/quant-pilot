@@ -20,6 +20,7 @@ import yaml
 from backtest.custom_loop import (
     LOT_SIZE,
     CustomLoopBacktest,
+    _Lot,
     _Position,
     buy_and_hold_targets,
     run_custom_backtest,
@@ -229,9 +230,9 @@ class TestSettlement:
         engine._prepare_market_data(df)
         days = engine.dates
 
-        # 人为构造: days[1] 买入 1000 股 (T+1 锁定至 days[2])
+        # 人为构造: days[1] 买入 1000 股 (T+1 批次, 解锁日 days[2])
         engine.positions["510300"] = _Position(
-            shares=1000, locked_shares=1000, unlock_date=days[2],
+            lots=[_Lot(shares=1000, unlock_date=days[2])],
         )
 
         trade = engine._execute_sell("510300", 1000, days[1])
@@ -259,7 +260,9 @@ class TestSettlement:
 
         buy = engine._execute_buy("513100", 1000, days[1])
         assert buy is not None
-        assert engine.positions["513100"].locked_shares == 0   # T+0 无锁定
+        pos = engine.positions["513100"]
+        assert pos.available(days[1]) == 1000              # T+0 无锁定
+        assert pos.locked_unlock_date(days[1]) is None
 
         sell = engine._execute_sell("513100", 1000, days[1])
         assert sell is not None and sell.shares == 1000        # 同日可卖
@@ -310,7 +313,8 @@ class TestNavRecords:
         assert result.nav.height == len(days)
         assert result.nav["date"].to_list() == days
         assert set(result.nav.columns) == {
-            "date", "cash", "position_value", "total_nav", "position_cap",
+            "date", "cash", "cash_withdrawable", "position_value",
+            "total_nav", "position_cap",
         }
         # 首日无成交, 净值 == 初始资金
         assert result.nav["total_nav"][0] == pytest.approx(INITIAL_CASH)
@@ -449,3 +453,217 @@ class TestRealData:
         idx = {d: i for i, d in enumerate(common)}
         # T+1 份额次一交易日解锁, T+0 当日解锁 → 交收日期相差一天
         assert idx[t1.settlement_date] - idx[t0.settlement_date] == 1
+
+
+# ------------------------------------------------------------------
+# C08: 成本情景命名 + 最低收费 + 手工往返对账 (独立期望值)
+# ------------------------------------------------------------------
+
+class TestCostScenarioAndMinFee:
+    """最低收费 = max(成交额×费率, min_commission); 滑点含价不二次扣现金."""
+
+    def test_min_commission_applied_when_above_rate(self):
+        """小额交易 (2,000 元) 佣金 = max(1.5, 5.0) = 5.0 元."""
+        df = make_ohlcv(["510300"], n_days=4)
+        days = business_days(date(2026, 1, 5), 4)
+        targets = weights([(days[0], "510300", 0.02)])  # 2,000 元 → 200 股
+
+        cost = {
+            "commission_rate": 0.00075, "min_commission_per_trade": 5.0,
+            "slippage_base": 0.0, "impact_coefficient": 0.0,
+            "slippage_lookback_days": 20,
+        }
+        result = run_custom_backtest(
+            df, targets, settlement={"510300": "T+1"},
+            initial_cash=INITIAL_CASH, settings={"trading_cost": cost},
+        )
+
+        t = result.trades[0]
+        assert t.shares == 200
+        assert t.commission == pytest.approx(5.0)  # max(2000×0.00075=1.5, 5.0)
+        # 现金独立核对: 初始 − 成交额 − 佣金
+        assert result.nav["cash"][-1] == pytest.approx(INITIAL_CASH - t.amount - 5.0)
+
+    def test_min_commission_ignored_below_rate(self):
+        """大额交易 → 佣金 = 成交额 × 费率, 最低收费不生效."""
+        df = make_ohlcv(["510300"], n_days=4)
+        days = business_days(date(2026, 1, 5), 4)
+        targets = weights([(days[0], "510300", 1.0)])
+
+        cost = {
+            "commission_rate": 0.00075, "min_commission_per_trade": 5.0,
+            "slippage_base": 0.0, "impact_coefficient": 0.0,
+            "slippage_lookback_days": 20,
+        }
+        result = run_custom_backtest(
+            df, targets, settlement={"510300": "T+1"},
+            initial_cash=INITIAL_CASH, settings={"trading_cost": cost},
+        )
+        t = result.trades[0]
+        assert t.commission == pytest.approx(t.amount * 0.00075)
+        assert t.commission > 5.0
+
+    def test_round_trip_manual_reconciliation(self):
+        """手工往返对账 (独立期望值, 不复用实现输出).
+
+        价格路径 10,10,10,12,12,12; 信号日0收盘买入 → 日1开盘成交;
+        信号日2收盘清仓 → 日3开盘成交. 滑点 0.15% 含在成交价, 佣金 0.075%/边.
+        手工: 买 5,000 股 @10.015 (额 50,075, 费 37.55625);
+              卖 5,000 股 @11.982 (额 59,910, 费 44.9325);
+              期末 = 100,000 − 50,075 − 37.55625 + 59,910 − 44.9325 = 109,752.51125.
+        """
+        df = make_ohlcv(
+            ["510300"], n_days=6,
+            prices={"510300": [10, 10, 10, 12, 12, 12]},
+        )
+        days = business_days(date(2026, 1, 5), 6)
+        targets = weights([(days[0], "510300", 0.5), (days[2], "510300", 0.0)])
+
+        result = run_custom_backtest(
+            df, targets, settlement={"510300": "T+1"},
+            initial_cash=INITIAL_CASH, settings={},
+        )
+
+        buys = [t for t in result.trades if t.side == "BUY"]
+        sells = [t for t in result.trades if t.side == "SELL"]
+        assert len(buys) == 1 and len(sells) == 1
+        buy, sell = buys[0], sells[0]
+        assert buy.trade_date == days[1] and sell.trade_date == days[3]
+
+        assert buy.shares == 5_000 and buy.price == pytest.approx(10.015)
+        assert sell.shares == 5_000 and sell.price == pytest.approx(11.982)
+        assert buy.commission == pytest.approx(50_075.0 * 0.00075)
+        assert sell.commission == pytest.approx(59_910.0 * 0.00075)
+        assert result.metrics["final_nav"] == pytest.approx(109_752.51125, abs=0.01)
+
+    def test_slippage_embedded_in_price_not_double_charged(self):
+        """滑点已体现在成交价 → 现金流只按价格计, 不再次扣滑点."""
+        df = make_ohlcv(["510300"], n_days=4, prices={"510300": [10, 10, 10, 10]})
+        days = business_days(date(2026, 1, 5), 4)
+        targets = weights([(days[0], "510300", 1.0)])
+
+        result = run_custom_backtest(
+            df, targets, settlement={"510300": "T+1"},
+            initial_cash=INITIAL_CASH, settings={},
+        )
+        t = result.trades[0]
+        # 现金变化 = 成交额 + 佣金 (滑点只在价格里, 不单独扣)
+        assert result.nav["cash"][-1] == pytest.approx(INITIAL_CASH - t.amount - t.commission)
+        assert t.slippage_cost > 0  # 滑点成本仅作诊断展示
+
+
+# ------------------------------------------------------------------
+# C05: 批次级可卖 + 现金可用/可取 + 不可成交场景 (独立期望值)
+# ------------------------------------------------------------------
+
+class TestLotAndCashAvailability:
+    """批次可卖时间、可取现金 T+1、无价格不成交、跳空成交价 (C05/C06)."""
+
+    def _engine(self, df, settlement=None):
+        engine = CustomLoopBacktest(
+            initial_cash=INITIAL_CASH,
+            settlement=settlement or {"510300": "T+1"},
+            cost={"slippage_base": 0.0, "impact_coefficient": 0.0,
+                  "commission_rate": 0.00075, "min_commission_per_trade": 0.0,
+                  "slippage_lookback_days": 20},
+        )
+        engine._prepare_market_data(df)
+        return engine
+
+    def test_t_plus_1_bought_today_not_sellable(self):
+        """T+1 当日买入份额同日不可卖; 卖单顺延至次日."""
+        df = make_ohlcv(["510300"], n_days=6)
+        engine = self._engine(df)
+        days = engine.dates
+
+        assert engine._execute_buy("510300", 1000, days[1]) is not None
+        assert engine.positions["510300"].available(days[1]) == 0
+
+        trade = engine._execute_sell("510300", 1000, days[1])
+        assert trade is None
+        assert len(engine.pending_sells) == 1
+        assert engine.pending_sells[0]["not_before"] == days[2]
+
+        engine._open_session(days[2])
+        assert engine.positions["510300"].shares == 0
+        assert len([t for t in engine.trades if t.side == "SELL"]) == 1
+
+    def test_second_lot_unlocks_independently(self):
+        """两批次解锁日不同: days[2] 只能卖第一批, 余量顺延 days[3]."""
+        df = make_ohlcv(["510300"], n_days=6)
+        engine = self._engine(df)
+        days = engine.dates
+
+        engine._execute_buy("510300", 1000, days[1])   # 解锁 days[2]
+        engine._execute_buy("510300", 200, days[2])    # 解锁 days[3]
+
+        trade = engine._execute_sell("510300", 1200, days[2])
+        assert trade is not None and trade.shares == 1000   # 只卖已解锁批次
+        assert engine.positions["510300"].shares == 200
+        assert engine.pending_sells == [{
+            "symbol": "510300", "shares": 200, "not_before": days[3],
+        }]
+
+        engine._open_session(days[3])
+        assert engine.positions["510300"].shares == 0
+        assert [t.shares for t in engine.trades if t.side == "SELL"] == [1000, 200]
+
+    def test_cash_withdrawable_lags_sell_by_one_day(self):
+        """卖出款当日可用 (cash) 但 T+1 才可取 (cash_withdrawable)."""
+        df = make_ohlcv(["510300"], n_days=6)
+        engine = self._engine(df)
+        days = engine.dates
+
+        # days[1] 买入 1000 股 @10 → 佣金 7.5
+        engine._execute_buy("510300", 1000, days[1])
+        expected_after_buy = INITIAL_CASH - 10_000.0 - 7.5
+        assert engine.cash == pytest.approx(expected_after_buy)
+        assert engine.cash_withdrawable == pytest.approx(expected_after_buy)
+
+        # days[2] 卖出 1000 股 @10 → 佣金 7.5; 可取仍停在买入后水平
+        engine._execute_sell("510300", 1000, days[2])
+        expected_after_sell = expected_after_buy + 10_000.0 - 7.5
+        assert engine.cash == pytest.approx(expected_after_sell)
+        assert engine.cash_withdrawable == pytest.approx(expected_after_buy)
+        assert engine.pending_withdrawable == pytest.approx(10_000.0 - 7.5)
+
+        # days[3] 开盘: 卖出款转可取
+        engine._open_session(days[3])
+        assert engine.cash_withdrawable == pytest.approx(expected_after_sell)
+
+    def test_missing_open_price_no_trade(self):
+        """执行日无有效开盘价 → 不成交 (停牌/数据缺失场景)."""
+        df = make_ohlcv(["A", "B"], n_days=6)
+        days = business_days(date(2026, 1, 5), 6)
+        df = df.filter(
+            ~((pl.col("symbol") == "B") & (pl.col("date") == days[2]))
+        )
+        engine = self._engine(df, settlement={"B": "T+1"})
+
+        engine._rebalance_to_target({"B": 1.0}, days[2])  # 无开盘价 → 不成交
+        assert engine.trades == []
+        assert engine.cash == pytest.approx(INITIAL_CASH)
+
+        engine._rebalance_to_target({"B": 1.0}, days[3])  # 有开盘价 → 成交
+        assert len(engine.trades) == 1
+
+    def test_gap_executes_at_next_open_not_assumed_stop(self):
+        """跳空场景: 卖出在 T+1 开盘价成交, 不按假定的止损价成交 (C06)."""
+        days = business_days(date(2026, 1, 5), 4)
+        path = [(10.0, 10.0), (10.0, 10.0), (8.0, 8.0), (8.2, 8.2)]
+        rows = []
+        for d, (op, cl) in zip(days, path, strict=True):
+            rows.append({
+                "symbol": "510300", "date": d, "open": op,
+                "high": max(op, cl), "low": min(op, cl), "close": cl,
+                "volume": 1e6, "amount": 1e9,
+            })
+        df = pl.DataFrame(rows)
+        engine = self._engine(df)
+
+        engine._rebalance_to_target({"510300": 1.0}, days[1])   # 买入 @10.0
+        sell_trade = engine._execute_sell("510300", 1000, days[2])
+        assert sell_trade is not None
+        assert sell_trade.trade_date == days[2]
+        assert sell_trade.price == pytest.approx(8.0)   # 跳空开盘价 (无滑点情景)
+        assert sell_trade.settlement_date == days[2]

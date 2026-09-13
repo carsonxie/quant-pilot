@@ -225,7 +225,9 @@ class TestMacroHistory:
         hist = load_macro_history(seeded_db, settings, n_days=30)
 
         assert hist.height == 30
-        assert set(hist.columns) == {"date", "composite_score", "position_cap", "regime"}
+        assert set(hist.columns) == {
+            "date", "composite_score", "position_cap", "regime", "breadth_pct",
+        }
 
         db = DuckDBManager(seeded_db)
         ohlcv = db.get_ohlcv(symbols=SYMBOLS)
@@ -237,6 +239,7 @@ class TestMacroHistory:
             row = hist.filter(pl.col("date") == t).row(0, named=True)
             assert row["composite_score"] == pytest.approx(direct.composite_score)
             assert row["position_cap"] == pytest.approx(direct.position_cap)
+            assert row["breadth_pct"] == pytest.approx(direct.breadth_pct)
 
     def test_missing_db_returns_empty(self, tmp_path):
         missing = str(tmp_path / "nope.duckdb")

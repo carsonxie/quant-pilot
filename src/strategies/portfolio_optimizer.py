@@ -1,10 +1,14 @@
 """组合优化模块 — 五层决策漏斗第四层.
 
-P0 实现: 波动率倒数加权 (Inverse Volatility Weighting)
-  w_i ∝ 1/σ_i²
+方法 (spec v3.0 §5.3, 算法标识必须与实际行为一致 — C01 修正):
+  - inverse_volatility (默认, v0.2 起): w_i ∝ 1/σ_i   — 波动率倒数
+  - inverse_variance (v0.1 旧口径, 保留对照): w_i ∝ 1/σ_i² — 方差倒数
 
 低波动标的获得更高权重, 高波动标的获得更低权重.
 权重归一化到宏观择时给出的仓位上限, 单标的权重上限 ≤ 30%.
+
+波动率声明: 过去 vol_lookback 个交易日对数收益率标准差 × sqrt(252);
+窗口至少 max(2, vol_lookback//2) 个点; 零波动/缺失/短历史标的被剔除, 不产生无限权重.
 
 P1 升级: 风险平价 (Risk Parity) + Ledoit-Wolf 协方差收缩.
 
@@ -36,7 +40,7 @@ class PortfolioWeight:
 
     symbol: str
     annualized_vol: float       # 年化波动率
-    raw_weight: float           # 原始权重 (w_i ∝ 1/σ_i²)
+    raw_weight: float           # 原始权重 (按 method: 1/σ 或 1/σ², 归一化前)
     final_weight: float         # 最终权重 (× position_cap, 经上限裁剪)
     is_capped: bool = False     # 是否触发了单标的上限
 
@@ -96,14 +100,18 @@ class PortfolioResult:
 # ------------------------------------------------------------------
 
 class PortfolioOptimizer:
-    """波动率倒数加权组合优化器.
+    """波动率倒数 / 方差倒数加权组合优化器.
 
     Args:
         vol_lookback: 波动率回溯窗口 (交易日, 默认 20)
         max_position_weight: 单标的最大权重 (默认 0.30)
         min_positions: 最小持仓数 (默认 1)
         max_positions: 最大持仓数 (默认 5)
+        method: "inverse_volatility" (w∝1/σ, 默认) | "inverse_variance" (w∝1/σ², 旧口径对照)
     """
+
+    #: 支持的加权算法标识 (spec §5.3)
+    METHODS = ("inverse_volatility", "inverse_variance")
 
     def __init__(
         self,
@@ -111,11 +119,17 @@ class PortfolioOptimizer:
         max_position_weight: float = 0.30,
         min_positions: int = 1,
         max_positions: int = 5,
+        method: str = "inverse_volatility",
     ) -> None:
+        if method not in self.METHODS:
+            raise ValueError(
+                f"未知的加权方法 method={method!r}, 支持: {self.METHODS}"
+            )
         self.vol_lookback = vol_lookback
         self.max_position_weight = max_position_weight
         self.min_positions = min_positions
         self.max_positions = max_positions
+        self.method = method
 
     # ------------------------------------------------------------------
     # 公开 API
@@ -156,6 +170,7 @@ class PortfolioOptimizer:
                 weights=[],
                 position_cap=position_cap,
                 total_weight=0.0,
+                method=self.method,
                 num_symbols_input=n_input,
                 num_symbols_output=0,
             )
@@ -176,6 +191,7 @@ class PortfolioOptimizer:
                 ],
                 position_cap=position_cap,
                 total_weight=round(final_weight, 6),
+                method=self.method,
                 vol_lookback=self.vol_lookback,
                 max_position_weight=self.max_position_weight,
                 num_symbols_input=n_input,
@@ -184,8 +200,8 @@ class PortfolioOptimizer:
                 max_annual_vol=vol_map[sym],
             )
 
-        # 计算原始权重: w_i = (1/σ_i²) / Σ(1/σ_j²)
-        raw_weights = self._calc_inverse_var_weights(vol_map)
+        # 按算法标识计算原始权重 (C01: 标识与行为必须一致)
+        raw_weights = self._calc_raw_weights(vol_map)
 
         # 应用仓位上限 + 单标的上限裁剪
         capped_weights = self._apply_caps(raw_weights, vol_map, position_cap)
@@ -198,6 +214,7 @@ class PortfolioOptimizer:
             weights=capped_weights,
             position_cap=position_cap,
             total_weight=round(total_w, 6),
+            method=self.method,
             vol_lookback=self.vol_lookback,
             max_position_weight=self.max_position_weight,
             num_symbols_input=n_input,
@@ -253,15 +270,47 @@ class PortfolioOptimizer:
     # 权重计算
     # ------------------------------------------------------------------
 
+    def _calc_raw_weights(self, vol_map: dict[str, float]) -> dict[str, float]:
+        """按 self.method 计算原始权重 (所有原始权重之和 = 1.0)."""
+        if self.method == "inverse_variance":
+            return self._calc_inverse_var_weights(vol_map)
+        return self._calc_inverse_vol_weights(vol_map)
+
+    @staticmethod
+    def _calc_inverse_vol_weights(
+        vol_map: dict[str, float],
+    ) -> dict[str, float]:
+        """波动率倒数加权原始权重 (inverse_volatility, spec §5.3 原意).
+
+        w_i_raw = (1/σ_i) / Σ(1/σ_j); 所有原始权重之和 = 1.0.
+
+        独立期望值: σ={0.10, 0.20} → 权重比 = 2:1.
+        """
+        inv_vol: dict[str, float] = {}
+        for sym, vol in vol_map.items():
+            inv_vol[sym] = 1.0 / vol
+
+        total_inv_vol = sum(inv_vol.values())
+
+        if total_inv_vol <= 0:
+            # 不应发生 (vol > 0 保证了 inv_vol > 0)
+            logger.warning("total_inv_vol == 0, using equal weight")
+            n = len(vol_map)
+            return {sym: 1.0 / n for sym in vol_map}
+
+        return {sym: iv / total_inv_vol for sym, iv in inv_vol.items()}
+
     @staticmethod
     def _calc_inverse_var_weights(
         vol_map: dict[str, float],
     ) -> dict[str, float]:
-        """计算波动率倒数加权原始权重.
+        """方差倒数加权原始权重 (inverse_variance, v0.1 旧口径, 保留对照).
 
         w_i_raw = (1/σ_i²) / Σ(1/σ_j²)
 
         所有原始权重之和 = 1.0.
+
+        独立期望值: σ={0.10, 0.20} → 权重比 = 4:1.
         """
         # 1/方差
         inv_var: dict[str, float] = {}
@@ -392,4 +441,5 @@ def from_settings(settings: dict) -> PortfolioOptimizer:
         max_position_weight=cfg.get("max_single_weight", 0.30),
         min_positions=cfg.get("min_positions", 1),
         max_positions=cfg.get("max_positions", 5),
+        method=cfg.get("method", "inverse_volatility"),
     )

@@ -1,15 +1,18 @@
 """数据质量护栏 — 写入 DuckDB 前的最后一道防线.
 
 检查项目:
-  1. 负价格拦截 (阻断) — CLAUDE.md §5.3
-  2. 单日涨跌幅 > 20% 拦截 (阻断) — background.md H4.1
+  1. 负价格拦截 (阻断)
+  2. 产品感知的单日涨跌幅检查 (C10, spec §4.4):
+     限内 pass / 超限容差内 warning (待核验) / 严重超限阻断 (疑似数据损坏或未调整权益事件)
   3. 缺失值比例报警 (警告)
   4. 时间戳连续性校验 (警告)
-  5. 数据行数偏离监控 (警告) — background.md H4.3
+  5. 数据行数偏离监控 (警告)
 
 设计原则:
   - 阻断级: 抛出异常, 阻止数据写入 DuckDB
   - 警告级: 记录日志, 不中断流程, 但触发报警
+  - 真实极端行情不修改数据; 权益事件 (拆分/分红) 未调整时按疑似异常隔离 (M2/M3 处理)
+  - 涨跌幅限制按产品区分: 默认 10% 板; 20% 板产品 (创业板/科创板 ETF) 经 overrides 传入
 
 Usage:
     from data_pipeline.processors.validator import validate_ohlcv
@@ -28,6 +31,10 @@ from typing import Optional
 import polars as pl
 
 logger = logging.getLogger(__name__)
+
+# ---- 涨跌幅检查参数 (产品感知, C10) ----
+DEFAULT_DAILY_LIMIT = 0.10   # 默认 10% 涨跌幅板 (主板/跨境/商品 ETF)
+DEFAULT_LIMIT_BUFFER = 0.02  # 超限容差: (limit, limit+buffer] → 警告复核; > → 阻断
 
 
 # ------------------------------------------------------------------
@@ -65,6 +72,9 @@ def validate_ohlcv(
     df: pl.DataFrame,
     critical_only: bool = False,
     historical_stats: Optional[dict] = None,
+    price_limits: dict[str, float] | None = None,
+    default_price_limit: float = DEFAULT_DAILY_LIMIT,
+    price_limit_buffer: float = DEFAULT_LIMIT_BUFFER,
 ) -> list[QualityIssue]:
     """对 OHLCV DataFrame 执行全量质量检查.
 
@@ -72,6 +82,9 @@ def validate_ohlcv(
         df: OHLCV 数据, 列: symbol, date, open, high, low, close, volume, amount
         critical_only: True 时仅执行阻断级检查 (适用于实时 pipeline)
         historical_stats: 历史元数据 {"avg_row_count": float, "std_row_count": float}
+        price_limits: symbol → 涨跌幅限制 (小数, 如 0.20); 未列出用 default_price_limit
+        default_price_limit: 默认涨跌幅限制 (0.10 = 10% 板)
+        price_limit_buffer: 超限容差; (limit, limit+buffer] 为警告复核区
 
     Returns:
         QualityIssue 列表 (空列表 = 全部通过)
@@ -80,7 +93,12 @@ def validate_ohlcv(
 
     # ---- 阻断级: 必须全部通过, 否则不进库 ----
     issues.extend(_check_negative_prices(df))
-    issues.extend(_check_daily_change(df))
+    issues.extend(_check_daily_change(
+        df,
+        limits=price_limits,
+        default_limit=default_price_limit,
+        buffer=price_limit_buffer,
+    ))
 
     if critical_only:
         return issues
@@ -147,52 +165,74 @@ def _check_negative_prices(df: pl.DataFrame) -> list[QualityIssue]:
 
 def _check_daily_change(
     df: pl.DataFrame,
-    max_pct: float = 0.20,
+    limits: dict[str, float] | None = None,
+    default_limit: float = DEFAULT_DAILY_LIMIT,
+    buffer: float = DEFAULT_LIMIT_BUFFER,
 ) -> list[QualityIssue]:
-    """H4.1 主项: 单日涨跌幅 > max_pct 的异常记录必须阻断.
+    """产品感知的单日涨跌幅检查 (C10, spec §4.4).
 
-    对每只 ETF 按日期排序后计算对数收益率, 若绝对值超过阈值则报警.
-    ETF 正常情况下极少出现单日 > 15% 的波动.
+    规则:
+      - |涨跌| ≤ 产品限制 → pass
+      - 限制 < |涨跌| ≤ 限制+容差 → warning (疑似权益事件/舍入, 保留数据待核验)
+      - |涨跌| > 限制+容差 → critical (疑似数据损坏或未调整权益事件, 阻断)
+
+    真实极端行情不修改数据; 20% 板产品 (如 159915/588000) 经 limits 传入.
 
     Args:
-        max_pct: 最大允许的日涨跌幅绝对值 (默认 20%)
+        df: OHLCV 数据 (需 symbol/date/close)
+        limits: symbol → 涨跌幅限制 (小数)
+        default_limit: 默认限制 (0.10 = 10% 板)
+        buffer: 超限容差 (0.02 = 2 个百分点)
     """
     issues: list[QualityIssue] = []
 
     if "close" not in df.columns or "symbol" not in df.columns or "date" not in df.columns:
         return issues
 
-    symbols = df["symbol"].unique().to_list()
-    for sym in symbols:
+    limits = limits or {}
+    for sym in df["symbol"].unique().to_list():
         sym_df = df.filter(pl.col("symbol") == sym).sort("date")
-
         if len(sym_df) < 2:
             continue
 
-        pct = sym_df["close"].pct_change()
-        extreme_mask = pct.abs() > max_pct
-        extreme_count = int(extreme_mask.sum())
+        limit = float(limits.get(sym, default_limit))
+        abs_pct = sym_df["close"].pct_change().abs()
+        soft_mask = (abs_pct > limit) & (abs_pct <= limit + buffer)
+        hard_mask = abs_pct > limit + buffer
+        soft_count = int(soft_mask.sum())
+        hard_count = int(hard_mask.sum())
 
-        if extreme_count > 0:
+        if soft_count > 0:
+            max_dev = float(abs_pct.filter(soft_mask).max())
+            issues.append(QualityIssue(
+                check="daily_change_review",
+                severity="warning",
+                symbol=sym,
+                detail=(
+                    f"{soft_count} row(s) move beyond {limit:.0%} limit but within "
+                    f"+{buffer:.0%} tolerance (max deviation {max_dev:.2%}) — "
+                    f"保留数据, 待核验权益事件/舍入"
+                ),
+                sample_rows=soft_count,
+            ))
+
+        if hard_count > 0:
             extreme_dates = (
-                sym_df.filter(extreme_mask)
-                .select("date")
-                .head(5)
-                ["date"].to_list()
+                sym_df.filter(hard_mask).select("date").head(5)["date"].to_list()
             )
-            # 取最大偏离值
-            max_deviation = pct.filter(extreme_mask).abs().max()
-
+            max_deviation = float(abs_pct.filter(hard_mask).max())
             issues.append(QualityIssue(
                 check="extreme_daily_change",
                 severity="critical",
                 symbol=sym,
                 detail=(
-                    f"{extreme_count} row(s) with |pct_change| > {max_pct:.0%}, "
+                    f"{hard_count} row(s) with |pct_change| > {limit + buffer:.0%} "
+                    f"(product limit {limit:.0%} + tolerance {buffer:.0%}), "
                     f"max deviation = {max_deviation:.2%}, "
-                    f"example dates: {[str(d) for d in extreme_dates]}"
+                    f"example dates: {[str(d) for d in extreme_dates]} — "
+                    f"疑似数据损坏或未调整权益事件(拆分/分红), 需人工核验"
                 ),
-                sample_rows=extreme_count,
+                sample_rows=hard_count,
             ))
 
     return issues

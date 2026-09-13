@@ -14,6 +14,8 @@ project:
   name: "Quant-Pilot"
   version: "0.1.0"
   random_seed: 42
+  mode: "research"              # 运行模式: research(默认, 研究/模拟) | paper(纸上) | real(真实资金, 需明确启用)
+  strategy_version: "v0.2"      # 策略版本: v0.1=1/σ² 旧口径(2026-09-13 前), v0.2=spec v3.0 修正后
 
 # --- 数据存储 ---
 storage:
@@ -63,13 +65,16 @@ universe:
     - {symbol: "513050", name: "中概互联ETF",       market_type: "跨境", settlement: "T+0"}
 
 # --- 交易成本 (实盘与回测必须一致) ---
-# 口径确认 (2026-09-11, 用户拍板): 佣金 round-trip 0.15% = 单边 0.075%;
-# 滑点 = max(0.15%/笔, 交易金额/日均成交额 × 0.5%), 买卖每笔分别计
+# 口径确认 (2026-09-11, 用户拍板): 佣金 round-trip 0.15% = 单边 0.075%
+# 情景命名 (spec v3.0 §6.3, C08): 当前使用 "legacy_stress" = 明确命名的旧压力情景,
+#   滑点 max(0.15%/笔, 交易金额/日均成交额 × 0.5%) 不是经校准的市场冲击定律;
+#   基准/更不利成本情景供实验对照 (M5/M6 声明, 研究示例须标注来源)。
 trading_cost:
-  commission_rate: 0.00075      # 单边佣金率 (round-trip 0.15%)
-  min_commission_per_trade: 0.0 # 最低佣金 (ETF 免最低佣金)
-  slippage_base: 0.0015         # 基础滑点下限 (0.15%/笔)
-  impact_coefficient: 0.005     # 冲击项系数 (交易金额/日均成交额 × 0.5%)
+  scenario: "legacy_stress"     # 当前成本情景名 (随回测报告输出)
+  commission_rate: 0.00075      # 单边佣金率 (研究假设: round-trip 0.15%)
+  min_commission_per_trade: 0.0 # 最低佣金/笔 (ETF 常见免最低; 引擎按 max(费率×金额, 本值) 计)
+  slippage_base: 0.0015         # 滑点下限 0.15%/笔 (旧压力情景参数)
+  impact_coefficient: 0.005     # 冲击项系数 (金额/日均额 × 0.5%; 旧压力情景参数)
   slippage_lookback_days: 20    # 日均成交额回看窗口 (交易日)
   stamp_duty: 0.0               # ETF 免印花税
 
@@ -77,8 +82,19 @@ trading_cost:
 backtest:
   initial_cash: 100000.0        # 初始资金 (元; 资金体量 <10万)
 
+# --- 数据质量 (产品感知涨跌幅, C10) ---
+data_quality:
+  daily_change:
+    default_limit_pct: 10.0      # 默认涨跌幅限制 (主板/跨境/商品 ETF)
+    limit_overrides_pct:         # 20% 涨跌幅板 (创业板/科创板相关 ETF; 生效区间待 M3)
+      "159915": 20.0
+      "588000": 20.0
+    review_buffer_pct: 2.0       # 超限容差: ≤限制+容差 → 警告复核(如权益事件/舍入); 超 → 阻断
+
 # --- 宏观择时 (第一层漏斗) ---
 macro_timing:
+  scope: "a_share"              # 宏观信号作用域 (spec §5.2): a_share=A股合计上限(默认);
+                                # all_composite=全组合择时 (显式研究版本, v0.1 旧行为)
   weight_trend: 0.30            # 趋势动量权重
   weight_breadth: 0.25          # 市场宽度权重
   weight_volatility: 0.20       # 波动率权重 (P1)
@@ -97,7 +113,10 @@ universe_filter:
 
 # --- 组合优化 (第四层漏斗) ---
 portfolio:
-  method: "inverse_volatility"  # P0: inverse_volatility | P1: risk_parity
+  # 加权方法 (spec §5.3, C01): inverse_volatility = w∝1/σ (默认, 原意);
+  # inverse_variance = w∝1/σ² (v0.1 旧口径, 保留对照); P1 另加 risk_parity
+  method: "inverse_volatility"
+  non_a_share_max_total: 0.30   # 跨境/商品合计上限 (研究示例待用户评估; spec §5.2 非A独立上限)
   vol_lookback: 20              # 波动率回溯窗口 (交易日)
   max_positions: 5              # 最大持仓数
   min_positions: 1              # 最小持仓数

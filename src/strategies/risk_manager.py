@@ -205,6 +205,10 @@ class RiskManager:
     ) -> Optional[StopLevel]:
         """计算单只标的的移动止损线.
 
+        研究近似 (C06): trailing_high 取近 2×ATR 周期窗口的收盘价最高值,
+        非"实际持有期"高水位 (持仓状态化在 M4 落地); 判定用 T 日收盘价,
+        未使用日内最低价; 触发后最早下一可交易时段执行, 跳空时不保证止损价成交.
+
         Args:
             ohlcv_df: 全量 OHLCV
             symbol: 标的代码

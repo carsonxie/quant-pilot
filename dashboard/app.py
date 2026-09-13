@@ -71,10 +71,13 @@ def main() -> None:
     macro_df = _macro_history(db_path, MACRO_HISTORY_DAYS)
     if not macro_df.empty:
         latest = macro_df.iloc[-1]
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("宏观得分", f"{latest['composite_score']:.0f} / 100")
-        c2.metric("市场状态", REGIME_CN.get(latest["regime"], latest["regime"]))
-        c3.metric("仓位上限", f"{latest['position_cap']:.0%}")
+        c2.metric("趋势状态(510300)", REGIME_CN.get(latest["regime"], latest["regime"]))
+        c3.metric("舱位上限", f"{latest['position_cap']:.0%}")
+        breadth = latest.get("breadth_pct")
+        if breadth is not None and breadth == breadth:  # NaN 防护
+            c4.metric("ETF代理宽度", f"{breadth:.0%}")
 
     st.caption(
         f"信号日期 {signal_date} · 数据源 `{settings['storage']['db_path']}` · "

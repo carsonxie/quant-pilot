@@ -508,6 +508,19 @@ def main() -> None:
         df = fetcher.fetch(symbols, start_date, end_date)
         logger.info("Fetch complete: %d rows", len(df))
 
+        # 全量导入不阻断, 但输出产品感知质检摘要 (历史含已知权益事件跳变;
+        # 明细由 validator 日志给出 — C10)
+        from data_pipeline.processors.validator import validate_ohlcv
+
+        issues = validate_ohlcv(df)
+        n_critical = sum(1 for i in issues if i.severity == "critical")
+        if n_critical:
+            logger.warning(
+                "全量导入质检: %d 个阻断级问题 (历史权益事件/疑似脏数据, "
+                "不阻断导入; 每日增量流程会按阻断处理, 明细见上方日志)",
+                n_critical,
+            )
+
         # 入库
         db_path = project_root / settings["storage"]["db_path"]
         from data_pipeline.duckdb_manager import DuckDBManager

@@ -3,6 +3,7 @@
 验证: 波动率倒数加权、仓位上限缩放、单标的上限裁剪、边界情况.
 """
 
+import math
 from datetime import date, timedelta
 
 import numpy as np
@@ -12,10 +13,8 @@ import pytest
 from strategies.portfolio_optimizer import (
     PortfolioOptimizer,
     PortfolioResult,
-    PortfolioWeight,
     from_settings,
 )
-
 
 # ------------------------------------------------------------------
 # 辅助: 生成合成 OHLCV
@@ -152,28 +151,87 @@ class TestVolatilityCalc:
 
 
 # ------------------------------------------------------------------
-# 逆方差权重计算
+# 加权方法: 算法标识与行为一致 (C01, spec §5.3)
 # ------------------------------------------------------------------
 
-class TestInverseVarWeights:
-    def test_sum_to_one(self, opt):
-        """原始权重之和 = 1.0."""
-        vol_map = {"A": 0.20, "B": 0.30, "C": 0.50}
-        weights = opt._calc_inverse_var_weights(vol_map)
-        assert abs(sum(weights.values()) - 1.0) < 1e-6
+class TestWeightMethods:
+    """inverse_volatility = 1/σ; inverse_variance = 1/σ² (独立期望值)."""
 
-    def test_low_vol_gets_higher_weight(self, opt):
-        """低波动 → 高权重."""
-        vol_map = {"LOW": 0.10, "HIGH": 0.40}
-        weights = opt._calc_inverse_var_weights(vol_map)
-        assert weights["LOW"] > weights["HIGH"]
+    def test_inverse_volatility_ratio_2_to_1(self):
+        """σ={10%, 20%} → w 比例 = (1/0.10) : (1/0.20) = 2:1."""
+        opt = PortfolioOptimizer(method="inverse_volatility")
+        weights = opt._calc_raw_weights({"LOW": 0.10, "HIGH": 0.20})
+        assert weights["LOW"] == pytest.approx(2 / 3)
+        assert weights["HIGH"] == pytest.approx(1 / 3)
+        assert weights["LOW"] / weights["HIGH"] == pytest.approx(2.0)
 
-    def test_equal_vol_equal_weight(self, opt):
-        """相同波动率 → 等权重."""
-        vol_map = {"A": 0.25, "B": 0.25, "C": 0.25}
-        weights = opt._calc_inverse_var_weights(vol_map)
-        for w in weights.values():
-            assert abs(w - 1.0 / 3) < 1e-6
+    def test_inverse_variance_ratio_4_to_1(self):
+        """σ={10%, 20%} → w 比例 = (1/0.1²) : (1/0.2²) = 4:1 (v0.1 旧口径)."""
+        opt = PortfolioOptimizer(method="inverse_variance")
+        weights = opt._calc_raw_weights({"LOW": 0.10, "HIGH": 0.20})
+        assert weights["LOW"] == pytest.approx(0.8)
+        assert weights["HIGH"] == pytest.approx(0.2)
+        assert weights["LOW"] / weights["HIGH"] == pytest.approx(4.0)
+
+    def test_default_method_is_inverse_volatility(self):
+        """默认 method = inverse_volatility (1/σ), 不是 1/σ²."""
+        opt = PortfolioOptimizer()
+        assert opt.method == "inverse_volatility"
+        weights = opt._calc_raw_weights({"LOW": 0.10, "HIGH": 0.20})
+        assert weights["LOW"] == pytest.approx(2 / 3)  # 1/σ² 会得到 0.8
+
+    def test_sum_to_one_and_equal_vol_equal_weight(self):
+        """两种方法: 权重和 = 1; 相同波动率 → 等权."""
+        for method in ("inverse_volatility", "inverse_variance"):
+            opt = PortfolioOptimizer(method=method)
+            weights = opt._calc_raw_weights({"A": 0.25, "B": 0.25, "C": 0.25})
+            assert sum(weights.values()) == pytest.approx(1.0)
+            for w in weights.values():
+                assert w == pytest.approx(1 / 3)
+
+    def test_low_vol_gets_higher_weight(self):
+        """低波动 → 高权重 (两种方法一致)."""
+        for method in ("inverse_volatility", "inverse_variance"):
+            opt = PortfolioOptimizer(method=method)
+            weights = opt._calc_raw_weights({"LOW": 0.10, "HIGH": 0.40})
+            assert weights["LOW"] > weights["HIGH"]
+
+    def test_unknown_method_rejected(self):
+        with pytest.raises(ValueError, match="method"):
+            PortfolioOptimizer(method="risk_parity")
+
+    def test_optimize_result_reports_configured_method(self, three_etf_df):
+        """PortfolioResult.method 与实际算法一致."""
+        opt = PortfolioOptimizer(method="inverse_variance")
+        result = opt.optimize(three_etf_df, position_cap=0.60)
+        assert result.method == "inverse_variance"
+
+    def test_optimize_public_api_vol_ratio(self):
+        """公开 API: 构造 σ 比 = 2 的两只标的 → 1/σ 权重比 = 2:1.
+
+        对数收益模式 ±0.5% / ±1.0% 交替 → std 比恰为 2.
+        仓位上限 0.45: 权重 = (0.30, 0.15), 均未触发单标的上限.
+        """
+        n = 21
+
+        def _series(sym: str, r: float) -> pl.DataFrame:
+            prices = [3.0]
+            for i in range(n - 1):
+                prices.append(prices[-1] * math.exp(r if i % 2 == 0 else -r))
+            return pl.DataFrame({
+                "symbol": [sym] * n,
+                "date": [date(2025, 1, 2) + timedelta(days=i) for i in range(n)],
+                "open": prices, "high": prices, "low": prices,
+                "close": prices,
+                "volume": [1e6] * n, "amount": [1e8] * n,
+            })
+
+        df = pl.concat([_series("LOW", 0.005), _series("HIGH", 0.010)])
+        opt = PortfolioOptimizer(method="inverse_volatility")
+        result = opt.optimize(df, position_cap=0.45)
+        w = {x.symbol: x.final_weight for x in result.weights}
+        assert w["LOW"] == pytest.approx(0.30, abs=1e-6)
+        assert w["HIGH"] == pytest.approx(0.15, abs=1e-6)
 
 
 # ------------------------------------------------------------------
@@ -463,6 +521,17 @@ class TestFromSettings:
         opt = from_settings(settings)
         assert opt.vol_lookback == 20  # default
         assert opt.max_position_weight == 0.30  # default
+
+    def test_method_from_settings(self):
+        """settings.portfolio.method 决定加权算法 (C01: 标识与行为一致)."""
+        opt = from_settings({"portfolio": {"method": "inverse_variance"}})
+        assert opt.method == "inverse_variance"
+        weights = opt._calc_raw_weights({"LOW": 0.10, "HIGH": 0.20})
+        assert weights["LOW"] == pytest.approx(0.8)  # 旧口径 1/σ²
+
+    def test_default_method_from_settings(self):
+        opt = from_settings({})
+        assert opt.method == "inverse_volatility"
 
 
 # ------------------------------------------------------------------

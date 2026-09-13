@@ -249,11 +249,21 @@ class TestListDaysFilter:
 # ------------------------------------------------------------------
 
 class TestPremiumFilter:
-    def test_no_nav_data_skips_check(self, uf):
-        """无 NAV 数据 → 溢价检查被跳过, 不影响通过."""
+    def test_no_nav_data_records_unknown(self, uf):
+        """无 NAV 数据 → 溢价检查 unknown 记录 (不静默), Phase 0 仍通过筛选."""
         df = make_ohlcv_df(["A"], n_days=120)
         result = uf.filter(df)  # 无 nav_df
         assert "A" in result.passed
+        assert "A" in result.unknown
+        assert result.n_unknown == 1
+        assert any("NAV" in r for r in result.unknown["A"])
+
+    def test_unknown_not_recorded_when_nav_present(self, uf):
+        """提供 NAV 且限内 → unknown 为空."""
+        df = make_ohlcv_df(["A"], n_days=120, amounts={"A": 1e8})
+        nav = make_nav_df(["A"], navs={"A": 3.48})
+        result = uf.filter(df, nav_df=nav)
+        assert result.unknown == {}
 
     def test_normal_premium_passes(self, uf):
         """溢价 1% → 通过."""

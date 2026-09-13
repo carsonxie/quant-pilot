@@ -5,13 +5,11 @@
 
 from datetime import date, timedelta
 
-import numpy as np
 import polars as pl
 import pytest
 
 from data_pipeline.processors.validator import (
     DataQualityError,
-    QualityIssue,
     _check_daily_change,
     _check_missing_values,
     _check_negative_prices,
@@ -19,7 +17,6 @@ from data_pipeline.processors.validator import (
     _check_timestamp_continuity,
     validate_ohlcv,
 )
-
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -99,12 +96,65 @@ class TestDailyChange:
         assert issues[0].check == "extreme_daily_change"
 
     def test_custom_threshold(self, clean_df):
-        """自定义阈值 5%."""
-        issues = _check_daily_change(clean_df, max_pct=0.05)
-        # 可能有小幅波动 > 5%, 但至少不报空
-        # 用 0.001 测试: 几乎任何波动都触发
-        issues = _check_daily_change(clean_df, max_pct=0.001)
-        assert len(issues) >= 1  # 几乎肯定会触发
+        """更紧的限制 (0.1%) + 零容差 → 触发阻断级."""
+        issues = _check_daily_change(clean_df, default_limit=0.001, buffer=0.0)
+        assert len(issues) >= 1
+        assert all(i.severity == "critical" for i in issues)
+        assert issues[0].check == "extreme_daily_change"
+
+
+class TestProductAwareDailyChange:
+    """C10: 产品感知涨跌幅 — 10%/20% 板与超限容差分级."""
+
+    @staticmethod
+    def _df_with_move(symbol: str, move: float):
+        base = 3.0
+        return pl.DataFrame({
+            "symbol": [symbol, symbol],
+            "date": [date(2024, 1, 2), date(2024, 1, 3)],
+            "close": [base, base * (1 + move)],
+        })
+
+    def test_within_10pct_limit_passes(self):
+        assert _check_daily_change(self._df_with_move("510300", 0.08)) == []
+
+    def test_within_20pct_board_limit_passes(self):
+        limits = {"159915": 0.20}
+        assert _check_daily_change(
+            self._df_with_move("159915", 0.195), limits=limits,
+        ) == []
+
+    def test_small_overshoot_is_warning_not_block(self):
+        """10% 板 +10.8% (容差内) → 警告复核, 不阻断."""
+        issues = _check_daily_change(self._df_with_move("510300", 0.108))
+        assert len(issues) == 1
+        assert issues[0].severity == "warning"
+        assert issues[0].check == "daily_change_review"
+
+    def test_large_overshoot_is_critical(self):
+        issues = _check_daily_change(self._df_with_move("510300", 0.25))
+        assert len(issues) == 1
+        assert issues[0].severity == "critical"
+
+    def test_split_like_artifact_critical(self):
+        """未调整权益事件 (-50% 拆分) 被隔离为 critical."""
+        issues = _check_daily_change(self._df_with_move("512480", -0.50))
+        assert any(i.severity == "critical" for i in issues)
+
+    def test_20pct_board_zones(self):
+        limits = {"159915": 0.20}
+        issues = _check_daily_change(self._df_with_move("159915", 0.21), limits=limits)
+        assert len(issues) == 1 and issues[0].severity == "warning"
+        issues = _check_daily_change(self._df_with_move("159915", 0.45), limits=limits)
+        assert any(i.severity == "critical" for i in issues)
+
+    def test_validate_ohlcv_passes_limits_through(self):
+        """validate_ohlcv 的 price_limits 覆盖默认 10% 板."""
+        df = self._df_with_move("159915", 0.15)  # +15%
+        assert any(i.severity == "critical" for i in validate_ohlcv(df, critical_only=True))
+        assert validate_ohlcv(
+            df, critical_only=True, price_limits={"159915": 0.20},
+        ) == []
 
 
 # ------------------------------------------------------------------

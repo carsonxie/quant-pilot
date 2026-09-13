@@ -37,12 +37,14 @@ class UniverseFilterResult:
         passed: 通过筛选的标的 symbol 列表 (按 symbol 排序)
         failed: symbol → 失败原因列表 的映射
         warnings: symbol → 警告信息列表 的映射 (通过但存在风险)
-        stats: 统计摘要 (n_total, n_passed, n_failed, n_warnings)
+        unknown: symbol → 待核验原因列表 的映射 (如 NAV 缺失; C10: 不得静默通过)
+        stats: 统计摘要 (n_total, n_passed, n_failed, n_warnings, n_unknown)
     """
 
     passed: list[str] = field(default_factory=list)
     failed: dict[str, list[str]] = field(default_factory=dict)
     warnings: dict[str, list[str]] = field(default_factory=dict)
+    unknown: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def n_total(self) -> int:
@@ -64,6 +66,11 @@ class UniverseFilterResult:
         """警告数."""
         return len(self.warnings)
 
+    @property
+    def n_unknown(self) -> int:
+        """待核验 (unknown) 数."""
+        return len(self.unknown)
+
     def summary(self) -> str:
         """人类可读摘要."""
         lines = [
@@ -76,6 +83,10 @@ class UniverseFilterResult:
         if self.warnings:
             lines.append("  Warnings:")
             for sym, msgs in sorted(self.warnings.items()):
+                lines.append(f"    {sym}: {', '.join(msgs)}")
+        if self.unknown:
+            lines.append("  Unknown (待核验, 不视为通过; 完整禁买规则见 M3):")
+            for sym, msgs in sorted(self.unknown.items()):
                 lines.append(f"    {sym}: {', '.join(msgs)}")
         return "\n".join(lines)
 
@@ -154,6 +165,7 @@ class UniverseFilter:
             sym_metrics = metrics.get(sym, {})
             fail_reasons: list[str] = []
             warn_msgs: list[str] = []
+            unknown_msgs: list[str] = []
 
             # 2a. 日均成交额检查
             self._check_volume(sym, sym_metrics, fail_reasons)
@@ -161,8 +173,8 @@ class UniverseFilter:
             # 2b. 上市天数检查
             self._check_list_days(sym, sym_metrics, fail_reasons)
 
-            # 2c. 溢价检查 (仅当 NAV 数据可用时)
-            self._check_premium(sym, sym_metrics, fail_reasons)
+            # 2c. 溢价检查: NAV 缺失 → unknown (记录, 不静默; C10)
+            self._check_premium(sym, sym_metrics, fail_reasons, unknown_msgs)
 
             # 2d. 流动性集中度检查 (仅对通过前 3 项的标的)
             if not fail_reasons:
@@ -177,11 +189,13 @@ class UniverseFilter:
                 result.passed.append(sym)
                 if warn_msgs:
                     result.warnings[sym] = warn_msgs
+            if unknown_msgs:
+                result.unknown[sym] = unknown_msgs
 
         result.passed.sort()
         logger.info(
-            "UniverseFilter: %d/%d passed, %d warnings",
-            result.n_passed, result.n_total, result.n_warnings,
+            "UniverseFilter: %d/%d passed, %d warnings, %d unknown",
+            result.n_passed, result.n_total, result.n_warnings, result.n_unknown,
         )
         return result
 
@@ -320,11 +334,17 @@ class UniverseFilter:
 
     def _check_premium(
         self, sym: str, metrics: dict, reasons: list[str],
+        unknown_reasons: list[str],
     ) -> None:
-        """溢价/折价检查 (价格偏离 NAV > 阈值)."""
+        """溢价/折价检查 (价格偏离 NAV > 阈值).
+
+        NAV 缺失/无效 → unknown 记录 (spec §4.4: 不能静默通过; 完整禁买规则 M3).
+        """
         nav = metrics.get("latest_nav")
         if nav is None or nav <= 0:
-            # NAV 数据不可用 — 静默跳过 (不视为不合格)
+            unknown_reasons.append(
+                "NAV/IOPV 数据缺失, 溢价检查 unknown (不得视为通过; 禁新买待 M3)"
+            )
             return
 
         close = metrics.get("latest_close", 0.0)

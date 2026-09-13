@@ -3,7 +3,12 @@
 核心约束 (AGENTS §5.2 / background.md 致命坑):
   - 无未来函数: T 日收盘后生成信号, 一律 T+1 开盘价成交 (禁止 T 日收盘价成交)
   - 摩擦成本: 单边佣金 0.075% (round-trip 0.15%, 用户确认口径) +
-    每笔滑点 = max(0.15%, 成交金额 / 20日均成交额 × 0.5%) (H2.2 冲击成本模型)
+    每笔滑点 = max(0.15%, 成交金额 / 20日均成交额 × 0.5%)。
+    口径说明 (spec v3.0 §6.3, C08): 该滑点公式为**明确命名的旧压力情景**
+    ("legacy_stress"), 不是经校准的市场冲击定律; 实验对照情景经 cost= 参数注入。
+  - 最低收费: 每笔佣金 = max(成交额 × 费率, min_commission_per_trade)
+  - 批次与现金 (C05): 买入按批次 (lot) 记录可卖时间; 卖出款当日可用于买入,
+    T+1 才可取; nav 同时记录 cash 与 cash_withdrawable
   - T+0/T+1 元数据路由: 买入份额按 settlement_type 解锁
     (T+0 当日可卖; T+1 次日可卖); 锁定期卖单顺延至解锁日开盘执行
   - 动态仓位上限: 逐日读取 position_cap (来自宏观择时), 约束目标总市值
@@ -39,9 +44,10 @@ TRADING_DAYS_PER_YEAR = 252
 
 # settings.trading_cost 缺省值 (与 config/settings.yaml 保持一致)
 _DEFAULT_COST = {
-    "commission_rate": 0.00075,     # 单边佣金 (round-trip 0.15%)
-    "slippage_base": 0.0015,        # 滑点下限 0.15%/笔
-    "impact_coefficient": 0.005,    # 冲击项: 金额/日均额 × 0.5%
+    "commission_rate": 0.00075,          # 单边佣金 (round-trip 0.15%, 研究假设)
+    "min_commission_per_trade": 0.0,     # 最低佣金/笔 (max(费率×金额, 本值))
+    "slippage_base": 0.0015,             # 滑点下限 0.15%/笔 (旧压力情景参数)
+    "impact_coefficient": 0.005,         # 冲击项: 金额/日均额 × 0.5% (旧压力情景参数)
     "slippage_lookback_days": 20,
 }
 
@@ -67,23 +73,60 @@ class Trade:
 
 
 @dataclass
-class _Position:
-    """单标的持仓状态."""
+class _Lot:
+    """买入批次 (C05: 批次级可卖时间)."""
 
-    shares: int = 0
-    locked_shares: int = 0                  # 已买入未解锁份额 (T+1)
-    unlock_date: date | None = None      # locked_shares 的解锁日
+    shares: int
+    unlock_date: date   # 份额可卖起始日 (T+0 = 成交当日; T+1 = 次一交易日)
+
+
+@dataclass
+class _Position:
+    """单标的持仓状态 (按买入批次管理可卖时间)."""
+
+    lots: list[_Lot] = field(default_factory=list)
     cost_basis: float = 0.0                 # 累计买入成本 (含费用, 供诊断)
+
+    @property
+    def shares(self) -> int:
+        return sum(lot.shares for lot in self.lots)
+
+    def available(self, d: date) -> int:
+        """d 日可卖份额 (解锁日 ≤ d 的批次合计)."""
+        return sum(lot.shares for lot in self.lots if lot.unlock_date <= d)
+
+    def locked_unlock_date(self, d: date) -> date | None:
+        """d 日仍锁定批次的最早解锁日 (无则 None)."""
+        dates = [lot.unlock_date for lot in self.lots if lot.unlock_date > d]
+        return min(dates) if dates else None
+
+    def consume_available(self, d: date, n: int) -> int:
+        """从可卖批次 FIFO 扣减 n 份, 返回实际扣减数."""
+        consumed = 0
+        for lot in self.lots:
+            if consumed >= n:
+                break
+            if lot.unlock_date <= d and lot.shares > 0:
+                take = min(lot.shares, n - consumed)
+                lot.shares -= take
+                consumed += take
+        self.lots = [lot for lot in self.lots if lot.shares > 0]
+        return consumed
+
+
+# 价格/权益口径说明 (C09/A0-4): 当前使用不复权价格, 不含分红/权益事件
+CALIBER_NOTE = "价格口径: 不复权 (Sina); 不含分红/权益事件 — 完整账本验收待 M2"
 
 
 @dataclass
 class BacktestResult:
     """回测结果."""
 
-    nav: pl.DataFrame          # date, cash, position_value, total_nav, position_cap
+    nav: pl.DataFrame          # date, cash, cash_withdrawable, position_value, nav, cap
     trades: list[Trade]
     initial_cash: float
     metrics: dict[str, float] = field(default_factory=dict)
+    caliber_note: str = CALIBER_NOTE
 
     def summary(self) -> str:
         """人类可读摘要."""
@@ -96,6 +139,7 @@ class BacktestResult:
             f"max_drawdown={m.get('max_drawdown', 0.0):.2%}, "
             f"trades={m.get('n_trades', 0):.0f}, "
             f"total_cost={m.get('total_cost', 0.0):,.2f})",
+            f"口径: {self.caliber_note}",
         ]
         return "\n".join(lines)
 
@@ -136,7 +180,9 @@ class CustomLoopBacktest:
         self.position_cap = position_cap
 
         # 运行时状态
-        self.cash = float(initial_cash)
+        self.cash = float(initial_cash)                # 可用现金 (卖出款当日可用于买入)
+        self.cash_withdrawable = float(initial_cash)   # 可取现金 (卖出款 T+1 可取, C05)
+        self.pending_withdrawable = 0.0                # 当日卖出待转可取的金额
         self.positions: dict[str, _Position] = {}
         self.trades: list[Trade] = []
         self.pending_sells: list[dict] = []
@@ -188,6 +234,7 @@ class CustomLoopBacktest:
             self.nav_records.append({
                 "date": d,
                 "cash": self.cash,
+                "cash_withdrawable": self.cash_withdrawable,
                 "position_value": position_value,
                 "total_nav": total_nav,
                 "position_cap": self._cap_for(d),
@@ -277,17 +324,11 @@ class CustomLoopBacktest:
     # ------------------------------------------------------------------
 
     def _open_session(self, d: date) -> None:
-        """开盘阶段: 解锁到期份额 → 执行顺延卖单."""
-        # 1. 解锁
-        for sym, pos in self.positions.items():
-            if (
-                pos.locked_shares > 0
-                and pos.unlock_date is not None
-                and pos.unlock_date <= d
-            ):
-                logger.debug("%s: %d 股解锁于 %s", sym, pos.locked_shares, d)
-                pos.locked_shares = 0
-                pos.unlock_date = None
+        """开盘阶段: 前日卖出款转可取 → 执行顺延卖单 (lot 解锁按日期自动生效)."""
+        # 1. 前一日卖出资金 T+1 转为可取 (C05: 可取 ≠ 当日可用)
+        if self.pending_withdrawable > 0:
+            self.cash_withdrawable += self.pending_withdrawable
+            self.pending_withdrawable = 0.0
 
         # 2. 顺延卖单 (锁定期间被推迟的卖出)
         deferred: list[dict] = []
@@ -336,6 +377,12 @@ class CustomLoopBacktest:
             if tgt > cur:
                 self._execute_buy(sym, tgt - cur, d, note="调仓买入")
 
+    def _commission_of(self, amount: float) -> float:
+        """每笔佣金 = max(成交额 × 单边费率, 最低收费) (spec §6.3, C08)."""
+        rate = float(self.cost["commission_rate"])
+        minimum = float(self.cost.get("min_commission_per_trade", 0.0))
+        return max(amount * rate, minimum)
+
     def _slippage_rate(self, symbol: str, d: date, amount_est: float) -> float:
         """每笔滑点率 = max(下限, 交易金额 / 前日为止20日均额 × 冲击系数)."""
         base = float(self.cost["slippage_base"])
@@ -354,8 +401,8 @@ class CustomLoopBacktest:
         if pos is None or pos.shares <= 0 or shares_want <= 0 or price0 is None:
             return None
 
-        available = pos.shares - pos.locked_shares
-        exec_shares = min(shares_want, available)
+        # 批次级可卖约束 (C05): 只卖解锁日 ≤ d 的份额
+        exec_shares = min(shares_want, pos.available(d))
 
         trade: Trade | None = None
         if exec_shares > 0:
@@ -363,30 +410,33 @@ class CustomLoopBacktest:
             slip = self._slippage_rate(symbol, d, amount_est)
             price = price0 * (1.0 - slip)
             amount = price * exec_shares
-            commission = amount * float(self.cost["commission_rate"])
+            commission = self._commission_of(amount)
             self.cash += amount - commission
-            pos.shares -= exec_shares
+            self.pending_withdrawable += amount - commission  # 卖出款 T+1 才可取 (C05)
+            pos.consume_available(d, exec_shares)
             trade = Trade(
                 trade_date=d, symbol=symbol, side="SELL", shares=exec_shares,
                 price=price, amount=amount, commission=commission,
                 slippage_cost=(price0 - price) * exec_shares,
-                settlement_date=d,  # 卖出资金当日可用
+                settlement_date=d,  # 卖出资金当日可用 (可取为 T+1)
                 note=note,
             )
             self.trades.append(trade)
 
-        # 锁定份额 → 顺延至解锁日
+        # 锁定份额 → 顺延至该批次解锁日
         deferred = shares_want - exec_shares
         if deferred > 0:
-            if pos.locked_shares > 0 and pos.unlock_date is not None:
+            locked = pos.shares - pos.available(d)
+            unlock_date = pos.locked_unlock_date(d)
+            if locked > 0 and unlock_date is not None:
                 self.pending_sells.append({
                     "symbol": symbol,
-                    "shares": min(deferred, pos.locked_shares),
-                    "not_before": pos.unlock_date,
+                    "shares": min(deferred, locked),
+                    "not_before": unlock_date,
                 })
                 logger.warning(
-                    "%s: 卖单 %d 股中 %d 股锁定 (解锁日 %s), 已顺延",
-                    symbol, shares_want, deferred, pos.unlock_date,
+                    "%s: 卖单 %d 股中 %d 股锁定 (最早解锁日 %s), 已顺延",
+                    symbol, shares_want, deferred, unlock_date,
                 )
             else:
                 logger.warning(
@@ -421,7 +471,7 @@ class CustomLoopBacktest:
             )
 
         amount = price * exec_shares
-        commission = amount * commission_rate
+        commission = self._commission_of(amount)
         self.cash -= amount + commission
 
         # 交收: T+0 当日可卖; T+1 次日解锁
@@ -429,12 +479,10 @@ class CustomLoopBacktest:
         unlock_date = d if settlement_type == "T+0" else self._next_trading_day(d)
 
         pos = self.positions.setdefault(symbol, _Position())
-        pos.shares += exec_shares
+        pos.lots.append(_Lot(shares=exec_shares, unlock_date=unlock_date))
         pos.cost_basis += amount + commission
-        if settlement_type != "T+0":
-            pos.locked_shares += exec_shares
-            if pos.unlock_date is None or unlock_date > pos.unlock_date:
-                pos.unlock_date = unlock_date
+        # 可取现金不得超过可用现金 (买入花费后收紧; 当日卖出款不可取)
+        self.cash_withdrawable = max(0.0, min(self.cash_withdrawable, self.cash))
 
         trade = Trade(
             trade_date=d, symbol=symbol, side="BUY", shares=exec_shares,
@@ -593,8 +641,11 @@ def main() -> None:
     db = DuckDBManager(str(project_root / settings["storage"]["db_path"]))
     try:
         initial_cash = float(settings.get("backtest", {}).get("initial_cash", 100_000.0))
-        print("==== Quant-Pilot 自研回测 v0.1 ====")
+        cost_scenario = settings.get("trading_cost", {}).get("scenario", "legacy_stress")
+        print("==== Quant-Pilot 自研回测 v0.2 ====")
         print(f"初始资金: {initial_cash:,.0f} 元")
+        print(f"成本情景: {cost_scenario} (旧压力情景, 未校准 — spec §6.3)")
+        print(f"口径提示: {CALIBER_NOTE}")
 
         for symbol in ("510300", "513100"):
             df = db.get_ohlcv(symbols=[symbol])

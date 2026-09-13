@@ -3,8 +3,9 @@
 决定总仓位上限, 防范系统性风险.
 
 P0 实现:
-  维度① 趋势动量 (30%): 沪深300 MA20/MA60 排列状态 + 价格偏离
-  维度② 市场宽度 (25%): 所有标的中站上 MA20 的比例
+  维度① 趋势动量 (30%): 沪深300(510300) MA20/MA60 排列状态 + 价格偏离
+  维度② ETF 代理宽度 (25%): 标的池中站上 MA20 的比例
+    (分母 = 当前标的池, 仅代表 ETF 代理宽度; 不得称为"全 A 市场宽度", spec §5.2)
 
 复合打分 0-100, 映射到仓位上限 0-100%.
 
@@ -34,7 +35,7 @@ class MacroScore:
     """宏观择时打分结果."""
 
     trend_score: float       # 趋势动量得分 0-100
-    breadth_score: float     # 市场宽度得分 0-100
+    breadth_score: float     # ETF 代理宽度得分 0-100 (分母=标的池)
     composite_score: float   # 加权复合得分 0-100
     position_cap: float      # 仓位上限 0.0-1.0
 
@@ -54,7 +55,7 @@ class MacroScore:
         return (
             f"MacroScore(composite={self.composite_score:.0f}, "
             f"cap={self.position_cap:.0%}, regime={self.regime}, "
-            f"trend={self.trend_score:.0f}, breadth={self.breadth_score:.0f})"
+            f"trend={self.trend_score:.0f}, etf_breadth={self.breadth_score:.0f})"
         )
 
 
@@ -69,7 +70,7 @@ class MacroTiming:
         ma_short: 短期均线周期 (默认 20)
         ma_long: 长期均线周期 (默认 60)
         weight_trend: 趋势动量权重 (默认 0.30)
-        weight_breadth: 市场宽度权重 (默认 0.25)
+        weight_breadth: ETF 代理宽度权重 (默认 0.25)
         plunge_threshold: 单日得分骤降阈值 (默认 30, 触发强制减仓)
     """
 
@@ -185,16 +186,16 @@ class MacroTiming:
         return max(0.0, min(100.0, base_score + adjustment))
 
     # ------------------------------------------------------------------
-    # 维度②: 市场宽度 (0-100)
+    # 维度②: ETF 代理宽度 (0-100, 分母 = 标的池)
     # ------------------------------------------------------------------
 
     def _calc_breadth_score(self, universe_df: pl.DataFrame) -> float:
-        """计算市场宽度得分.
+        """计算 ETF 代理宽度得分 (spec §5.2: 分母 = 标的池, 不得称全 A).
 
-        = 所有标的中收盘价 > MA20 的比例 × 100
+        = 标的池中收盘价 > MA20 的比例 × 100
 
-        高比例 → 市场普涨 (得分高)
-        低比例 → 少数标的上涨 (赚指数不赚钱)
+        高比例 → 多数 ETF 上行 (得分高)
+        低比例 → 少数 ETF 上行
         """
         pct = self._calc_breadth_pct(universe_df)
         if pct is None:
@@ -202,7 +203,7 @@ class MacroTiming:
         return pct * 100.0  # 0.0-1.0 → 0-100
 
     def _calc_breadth_pct(self, universe_df: pl.DataFrame) -> Optional[float]:
-        """计算站上 MA20 的标的比例."""
+        """计算 ETF 代理宽度: 站上 MA20 的标的比例 (分母 = 标的池, spec §5.2)."""
         if universe_df.is_empty():
             return None
 
@@ -273,7 +274,7 @@ class MacroTiming:
     def _diagnose(
         self, df: pl.DataFrame,
     ) -> tuple[str, Optional[float], Optional[float], Optional[float]]:
-        """判断当前市场状态 (牛市/熊市/震荡)."""
+        """判断趋势状态 (牛市/熊市/震荡, 基于基准 510300)."""
         if df.is_empty() or "close" not in df.columns:
             return "unknown", None, None, None
 
@@ -286,7 +287,7 @@ class MacroTiming:
             return "unknown", None, None, latest_close
         ratio = ma20_val / ma60_val if ma60_val > 0 else 1.0
 
-        # 判断市场状态
+        # 判断趋势状态
         if ratio > 1.03:
             regime = "bull"
         elif ratio < 0.97:
