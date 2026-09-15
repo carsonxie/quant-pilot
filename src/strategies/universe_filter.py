@@ -91,6 +91,17 @@ class UniverseFilterResult:
         return "\n".join(lines)
 
 
+@dataclass
+class SymbolEvaluation:
+    """单标的分项检查结果 (pass/fail/unknown/not_applicable + 原因, 不静默通过)."""
+
+    symbol: str
+    checks: dict[str, str] = field(default_factory=dict)
+    fail_reasons: list[str] = field(default_factory=list)
+    warn_msgs: list[str] = field(default_factory=list)
+    unknown_msgs: list[str] = field(default_factory=list)
+
+
 # ------------------------------------------------------------------
 # 核心类
 # ------------------------------------------------------------------
@@ -150,47 +161,20 @@ class UniverseFilter:
         Returns:
             UniverseFilterResult 包含通过/剔除/警告的完整结果
         """
-        # Step 0: 输入校验
-        symbols = self._validate_and_get_symbols(ohlcv_df)
-        if not symbols:
-            return UniverseFilterResult()
-
-        # Step 1: 计算每个标的的统计指标
-        metrics = self._compute_metrics(ohlcv_df, metadata_df, nav_df)
-
-        # Step 2: 逐项筛选
+        evaluations = self.evaluate(
+            ohlcv_df, metadata_df=metadata_df, nav_df=nav_df,
+            planned_capital=planned_capital,
+        )
         result = UniverseFilterResult()
-
-        for sym in symbols:
-            sym_metrics = metrics.get(sym, {})
-            fail_reasons: list[str] = []
-            warn_msgs: list[str] = []
-            unknown_msgs: list[str] = []
-
-            # 2a. 日均成交额检查
-            self._check_volume(sym, sym_metrics, fail_reasons)
-
-            # 2b. 上市天数检查
-            self._check_list_days(sym, sym_metrics, fail_reasons)
-
-            # 2c. 溢价检查: NAV 缺失 → unknown (记录, 不静默; C10)
-            self._check_premium(sym, sym_metrics, fail_reasons, unknown_msgs)
-
-            # 2d. 流动性集中度检查 (仅对通过前 3 项的标的)
-            if not fail_reasons:
-                self._check_concentration(
-                    sym, sym_metrics, planned_capital, warn_msgs
-                )
-
-            # 汇总
-            if fail_reasons:
-                result.failed[sym] = fail_reasons
+        for sym, ev in evaluations.items():
+            if ev.fail_reasons:
+                result.failed[sym] = ev.fail_reasons
             else:
                 result.passed.append(sym)
-                if warn_msgs:
-                    result.warnings[sym] = warn_msgs
-            if unknown_msgs:
-                result.unknown[sym] = unknown_msgs
+                if ev.warn_msgs:
+                    result.warnings[sym] = ev.warn_msgs
+            if ev.unknown_msgs:
+                result.unknown[sym] = ev.unknown_msgs
 
         result.passed.sort()
         logger.info(
@@ -198,6 +182,77 @@ class UniverseFilter:
             result.n_passed, result.n_total, result.n_warnings, result.n_unknown,
         )
         return result
+
+    def evaluate(
+        self,
+        ohlcv_df: pl.DataFrame,
+        metadata_df: pl.DataFrame | None = None,
+        nav_df: pl.DataFrame | None = None,
+        planned_capital: float = 100_000,
+    ) -> dict[str, SymbolEvaluation]:
+        """结构化分项检查 (pass/fail/unknown/not_applicable + 原因).
+
+        供四层池 (etf_pool) 生成买卖许可; filter() 由此构建兼容旧接口的结果.
+        """
+        symbols = self._validate_and_get_symbols(ohlcv_df)
+        if not symbols:
+            return {}
+
+        metrics = self._compute_metrics(ohlcv_df, metadata_df, nav_df)
+        out: dict[str, SymbolEvaluation] = {}
+        for sym in symbols:
+            m = metrics.get(sym, {})
+            ev = SymbolEvaluation(symbol=sym)
+
+            # 成交额
+            avg_amount = float(m.get("avg_amount", 0.0))
+            if avg_amount < self.min_avg_volume:
+                ev.checks["volume"] = "fail"
+                ev.fail_reasons.append(
+                    f"日均成交额 {avg_amount:,.0f} < {self.min_avg_volume:,.0f}"
+                )
+            else:
+                ev.checks["volume"] = "pass"
+
+            # 上市天数
+            n_days = int(m.get("n_days", 0))
+            if n_days < self.min_list_days:
+                ev.checks["listing"] = "fail"
+                ev.fail_reasons.append(
+                    f"上市 {n_days} 个交易日 < {self.min_list_days}"
+                )
+            else:
+                ev.checks["listing"] = "pass"
+
+            # 溢价 (NAV 缺失 → unknown, 不静默)
+            nav = m.get("latest_nav")
+            if nav is None or nav <= 0:
+                ev.checks["premium"] = "unknown"
+                ev.unknown_msgs.append(
+                    "NAV/IOPV 数据缺失, 溢价检查 unknown (不得视为通过)"
+                )
+            else:
+                close = float(m.get("latest_close", 0.0))
+                if close <= 0:
+                    ev.checks["premium"] = "unknown"
+                    ev.unknown_msgs.append("最新收盘价缺失, 溢价检查 unknown")
+                else:
+                    premium_pct = abs(close - nav) / nav * 100.0
+                    if premium_pct > self.max_premium_pct:
+                        ev.checks["premium"] = "fail"
+                        ev.fail_reasons.append(
+                            f"溢价率 {premium_pct:.2f}% > {self.max_premium_pct}%"
+                        )
+                    else:
+                        ev.checks["premium"] = "pass"
+
+            # 流动性集中度警告 (仅对无失败项的标的)
+            if not ev.fail_reasons:
+                self._check_concentration(
+                    sym, m, planned_capital, ev.warn_msgs
+                )
+            out[sym] = ev
+        return out
 
     # ------------------------------------------------------------------
     # 输入校验

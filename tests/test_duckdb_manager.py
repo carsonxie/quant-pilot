@@ -172,3 +172,154 @@ class TestUtilities:
         db.upsert_ohlcv(sample_ohlcv)
         symbols = db.get_symbols()
         assert "510300" in symbols
+
+
+class TestSchemaMigration:
+    """schema v1 → v2: 策略版本列 + 旧记录标注 (A0-1, plan §5 只增列)."""
+
+    def _make_v1_db(self, tmp_path) -> str:
+        """构造 v1 结构的旧库: trade_signals 无 strategy_version 列."""
+        import duckdb
+
+        db_path = str(tmp_path / "legacy.duckdb")
+        con = duckdb.connect(db_path)
+        con.execute("""
+            CREATE TABLE trade_signals (
+                signal_id BIGINT PRIMARY KEY,
+                signal_date DATE NOT NULL,
+                symbol VARCHAR NOT NULL,
+                direction VARCHAR NOT NULL,
+                target_weight DOUBLE,
+                trigger_reason VARCHAR,
+                executed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.execute("""
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                description VARCHAR
+            )
+        """)
+        con.execute(
+            "INSERT INTO schema_version (version, description) VALUES (1, 'v1')"
+        )
+        con.execute("""
+            INSERT INTO trade_signals
+                (signal_id, signal_date, symbol, direction,
+                 target_weight, trigger_reason)
+            VALUES (20260911001, DATE '2026-09-11', '510300', 'HOLD', 0.0, '旧口径信号')
+        """)
+        con.close()
+        return db_path
+
+    def test_migrates_v1_to_v2_and_marks_legacy(self, tmp_path):
+        db_path = self._make_v1_db(tmp_path)
+        db = DuckDBManager(db_path)
+        db.init_database()  # 迁移在此执行
+
+        # 旧行内容不被改写, 仅新增版本标注 v0.1
+        row = db.conn.execute(
+            "SELECT direction, trigger_reason, strategy_version "
+            "FROM trade_signals WHERE signal_id = 20260911001"
+        ).fetchone()
+        assert row[1] == "旧口径信号"
+        assert row[2] == "v0.1"
+
+        # 新写入携带 v0.2
+        db.upsert_signals(pl.DataFrame([{
+            "signal_id": 20260912001, "signal_date": date(2026, 9, 12),
+            "symbol": "510050", "direction": "BUY", "target_weight": 0.1,
+            "trigger_reason": "新口径", "strategy_version": "v0.2",
+        }]))
+        row2 = db.conn.execute(
+            "SELECT strategy_version FROM trade_signals WHERE signal_id = 20260912001"
+        ).fetchone()
+        assert row2[0] == "v0.2"
+        db.close()
+
+    def test_migration_idempotent(self, tmp_path):
+        db_path = self._make_v1_db(tmp_path)
+        for _ in range(2):
+            db = DuckDBManager(db_path)
+            db.init_database()
+            db.close()
+        db = DuckDBManager(db_path)
+        versions = db.conn.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+        db.close()
+        assert [v[0] for v in versions] == [1, 2, 3, 4]
+
+    def test_upsert_without_version_keeps_existing(self, db):
+        """旧调用方不传版本列时, 更新不覆盖已记录的版本 (COALESCE 保护)."""
+        db.upsert_signals(pl.DataFrame([{
+            "signal_id": 1, "signal_date": date(2026, 9, 1),
+            "symbol": "510300", "direction": "BUY", "target_weight": 0.1,
+            "trigger_reason": "v0.2 写入", "strategy_version": "v0.2",
+        }]))
+        db.upsert_signals(pl.DataFrame([{
+            "signal_id": 1, "signal_date": date(2026, 9, 1),
+            "symbol": "510300", "direction": "HOLD", "target_weight": 0.0,
+            "trigger_reason": "旧签名更新",
+        }]))
+        row = db.conn.execute(
+            "SELECT direction, strategy_version FROM trade_signals WHERE signal_id = 1"
+        ).fetchone()
+        assert row[0] == "HOLD"
+        assert row[1] == "v0.2"
+
+
+class TestV3TablesAndRuns:
+    """schema v3: 账户/四类记录/运行记录表与迁移 (M2)."""
+
+    def test_v3_tables_created(self, db):
+        for table in (
+            "accounts", "account_events", "position_lots", "account_snapshots",
+            "targets", "target_weights", "trade_proposals", "execution_feedback",
+            "runs", "experiments", "schema_migration_log",
+            "instruments", "universe_versions", "universe_members", "nav_daily",
+        ):
+            assert db.table_exists(table), f"缺少表: {table}"
+
+    def test_chained_migration_v1_to_v3(self, tmp_path):
+        db_path = TestSchemaMigration()._make_v1_db(tmp_path)
+        db = DuckDBManager(db_path)
+        db.init_database()
+        versions = [
+            row[0] for row in
+            db.conn.execute("SELECT version FROM schema_version ORDER BY 1").fetchall()
+        ]
+        assert versions == [1, 2, 3, 4]
+        assert db.table_exists("account_events")
+        assert db.table_exists("instruments")
+        logs = db.conn.execute(
+            "SELECT version, status FROM schema_migration_log ORDER BY version"
+        ).fetchall()
+        assert (3, "applied") in logs
+        assert (4, "applied") in logs
+        # 迁移不丢失 v1 事实
+        assert db.get_table_count("trade_signals") == 1
+        db.close()
+
+    def test_run_record_push_update(self, db):
+        db.insert_run(pl.DataFrame([{
+            "run_id": "daily-X", "run_type": "daily", "status": "ok",
+            "run_date": date(2026, 9, 11), "mode": "research",
+            "strategy_version": "v0.2", "data_version": "2026-09-11",
+        }]))
+        db.update_run_push("daily-X", False, 3, "network error")
+        row = db.get_run("daily-X")
+        assert row is not None
+        assert row["push_ok"] is False
+        assert row["push_attempts"] == 3
+        assert row["push_error"] == "network error"
+
+    def test_transaction_rolls_back_on_error(self, db):
+        with pytest.raises(RuntimeError), db.transaction():
+            db.upsert_account(pl.DataFrame([{
+                "account_id": "TX-1", "name": "x", "mode": "paper",
+            }]))
+            raise RuntimeError("boom")
+        assert db.get_accounts().is_empty()

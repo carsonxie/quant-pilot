@@ -22,10 +22,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import polars as pl
@@ -37,7 +39,7 @@ from data_pipeline.processors.validator import (
     compute_historical_stats,
     validate_ohlcv,
 )
-from strategies import portfolio_optimizer, risk_manager, universe_filter
+from strategies import etf_pool, portfolio_optimizer, risk_manager
 from strategies.macro_timing import MacroScore, MacroTiming
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,9 @@ class PipelineResult:
     """每日主流程运行结果."""
 
     run_date: str                            # 信号日期 (最新交易日, ISO 格式)
+    run_id: str = ""                         # 运行记录 ID (runs 表; A0-2)
+    target_id: str = ""                      # 目标组合 ID (targets 表; M2b)
+    pool_version: str = ""                   # 池版本 ID (universe_versions; M3)
     mode: str = "research"                   # 运行模式 (spec §10.1: research/paper/real)
     strategy_version: str = "unversioned"    # 策略版本 (settings.project.strategy_version)
     macro_scope: str = "a_share"             # 宏观信号作用域 (a_share | all_composite)
@@ -155,6 +160,7 @@ def run_daily_pipeline(
         DataQualityError: 新拉取数据存在阻断级质量问题, 流程终止
     """
     timings: dict[str, float] = {}
+    started_at = datetime.now()
     db = DuckDBManager(db_path)
     db.init_database()
 
@@ -176,6 +182,8 @@ def run_daily_pipeline(
             raise RuntimeError("ohlcv_daily 为空, 无法运行策略. 请先 uv run fetch-data")
 
         run_date = str(ohlcv["date"].max())
+        run_id = f"daily-{run_date.replace('-', '')}-{started_at:%H%M%S}"
+        target_id = f"target-{run_date.replace('-', '')}-{started_at:%H%M%S}"
         macro = MacroTiming(
             ma_short=settings["macro_timing"].get("ma_short", 20),
             ma_long=settings["macro_timing"].get("ma_long", 60),
@@ -187,13 +195,21 @@ def run_daily_pipeline(
         timings["macro_timing"] = time.perf_counter() - t0
         logger.info("宏观择时: %s (前日得分 %.1f)", score.summary(), prev_score)
 
-        # ---- Step 5: 标的清洗 ----
+        # ---- Step 5: 可交易池 (四层池层3; spec §4.2, M3) ----
         t0 = time.perf_counter()
-        uf = universe_filter.from_settings(settings)
         metadata = db.get_etf_metadata(symbols=symbols)
-        filter_result = uf.filter(ohlcv, metadata_df=metadata, nav_df=None)
+        date_ranges = db.get_symbol_date_ranges()
+        pool_version = etf_pool.sync_instruments_and_pool(db, settings, symbols)
+        nav_df = db.get_nav_daily(symbols)
+        pool_report = etf_pool.build_pool_report(
+            ohlcv, metadata_df=metadata, nav_df=nav_df,
+            decision_date=date.fromisoformat(run_date),
+            settings=settings,
+            latest_version=db.get_latest_universe_version(),
+            date_ranges=date_ranges,
+        )
         timings["universe_filter"] = time.perf_counter() - t0
-        logger.info("标的清洗:\n%s", filter_result.summary())
+        logger.info("可交易池:\n%s", pool_report.summary())
 
         # ---- Step 6: 组合优化 (按宏观 scope 分桶: A股 / 非A) ----
         t0 = time.perf_counter()
@@ -206,7 +222,7 @@ def run_daily_pipeline(
             etf["symbol"]: etf.get("market_type", "A股") for etf in universe_etfs
         }
         portfolio = _step_optimize_scoped(
-            optimizer, ohlcv, filter_result.passed,
+            optimizer, ohlcv, pool_report.buyable,
             score.position_cap, non_a_cap, market_types, scope,
         )
         timings["portfolio_optimize"] = time.perf_counter() - t0
@@ -234,29 +250,38 @@ def run_daily_pipeline(
         )
         signals = _step_generate_signals(
             portfolio, risk_report, score, prev_signals, turnover_threshold,
+            stale_symbols=pool_report.stale_symbols,
         )
         timings["signal_generate"] = time.perf_counter() - t0
 
-        # ---- Step 9: 信号落库 ----
+        # ---- Step 9: 信号落库 (含策略版本, A0-1) ----
         t0 = time.perf_counter()
-        _step_persist_signals(db, signals, run_date)
+        project_cfg = settings.get("project", {})
+        _step_persist_signals(
+            db, signals, run_date,
+            strategy_version=str(project_cfg.get("strategy_version", "unversioned")),
+        )
         timings["signal_persist"] = time.perf_counter() - t0
 
-        project_cfg = settings.get("project", {})
         result = PipelineResult(
             run_date=run_date,
+            run_id=run_id,
+            target_id=target_id,
+            pool_version=pool_version,
             mode=str(project_cfg.get("mode", "research")),
             strategy_version=str(project_cfg.get("strategy_version", "unversioned")),
             macro_scope=scope,
             macro_score=score,
             prev_macro_score=prev_score,
-            passed_symbols=filter_result.passed,
-            universe_unknown=filter_result.unknown,
+            passed_symbols=pool_report.buyable,
+            universe_unknown=pool_report.unknown,
             portfolio=portfolio,
             risk_report=risk_report,
             signals=signals,
             step_timings=timings,
         )
+        _step_write_run(db, result, started_at, universe_size=len(symbols))
+        _step_persist_target(db, result, universe_symbols=symbols)
         logger.info("\n%s", result.summary())
         return result
 
@@ -560,12 +585,14 @@ def _step_generate_signals(
     score: MacroScore,
     prev_signals: pl.DataFrame,
     turnover_threshold: float,
+    stale_symbols: set[str] | None = None,
 ) -> list[Signal]:
     """对比新旧目标权重生成 BUY/SELL/HOLD 信号.
 
-    规则 (spec §5.4/§5.5, C04: 普通调整规则不能压制风险或明确退出):
+    规则 (spec §5.4/§5.5, C04/C12: 普通调整规则不能压制风险或明确退出):
       - 明确退出(目标清零)、止损剔除、宏观骤降减仓 → 无条件 SELL, 不受防抖压制
       - 首次建仓 (prev=0 且 new>0) → BUY, 不因普通带宽永久跳过 (spec §5.4)
+      - 停牌/无有效价格 (stale): 无法卖出 → 保留原目标 (HOLD), 风险持续展示
       - 其余 |Δweight| < turnover_threshold → HOLD (维持昨日目标)
       - 常规增加 → BUY; 常规减少 → SELL
     """
@@ -597,7 +624,19 @@ def _step_generate_signals(
         elif raw_delta > 0.0 and prev_w <= 0.0:
             bypass_reason = "首次建仓"
 
-        if raw_delta < 0.0 and bypass_reason is not None:
+        # 停牌/无有效价格: 不能卖出, 保留原目标待可交易 (spec §4.4/§5.5)
+        hold_reason: str | None = None
+        stale_hold = (
+            raw_delta < 0.0
+            and bool(stale_symbols)
+            and sym in stale_symbols
+            and prev_w > 0.0
+        )
+        if stale_hold:
+            direction = "HOLD"
+            new_w = prev_w
+            hold_reason = "停牌/无有效价格: 无法卖出, 保留原目标待可交易"
+        elif raw_delta < 0.0 and bypass_reason is not None:
             direction = "SELL"
         elif raw_delta > 0.0 and bypass_reason is not None:
             direction = "BUY"
@@ -611,7 +650,8 @@ def _step_generate_signals(
 
         reason = _build_trigger_reason(
             sym, direction, new_w, prev_w, raw_delta,
-            turnover_threshold, portfolio, risk_report, score, bypass_reason,
+            turnover_threshold, portfolio, risk_report, score,
+            bypass_reason, hold_reason,
         )
         signals.append(Signal(
             symbol=sym, direction=direction,
@@ -633,6 +673,7 @@ def _build_trigger_reason(
     risk_report: risk_manager.RiskReport,
     score: MacroScore,
     bypass_reason: str | None,
+    hold_reason: str | None = None,
 ) -> str:
     """构建多层级归因字符串 (信号可追溯)."""
     parts = [
@@ -660,9 +701,12 @@ def _build_trigger_reason(
         parts.append(f"{bypass_reason}不受防抖限制")
 
     if direction == "HOLD":
-        parts.append(
-            f"变动{abs(raw_delta):.1%}<防抖阈值{turnover_threshold:.0%},维持原仓"
-        )
+        if hold_reason:
+            parts.append(hold_reason)
+        else:
+            parts.append(
+                f"变动{abs(raw_delta):.1%}<防抖阈值{turnover_threshold:.0%},维持原仓"
+            )
     else:
         parts.append(f"{prev_w:.1%}→{new_w:.1%}")
 
@@ -677,8 +721,9 @@ def _step_persist_signals(
     db: DuckDBManager,
     signals: list[Signal],
     run_date: str,
+    strategy_version: str = "unversioned",
 ) -> None:
-    """写入信号, signal_id 确定性生成保证幂等."""
+    """写入信号, signal_id 确定性生成保证幂等; 携带策略版本 (A0-1)."""
     if not signals:
         logger.info("无信号需要写入")
         return
@@ -693,10 +738,138 @@ def _step_persist_signals(
             "direction": sig.direction,
             "target_weight": sig.target_weight,
             "trigger_reason": sig.trigger_reason,
+            "strategy_version": strategy_version,
         }
         for idx, sig in enumerate(signals)
     ]
     db.upsert_signals(pl.DataFrame(rows))
+
+
+# ------------------------------------------------------------------
+# 运行记录 (runs 表; A0-2 / M2)
+# ------------------------------------------------------------------
+
+def _step_write_run(
+    db: DuckDBManager,
+    result: PipelineResult,
+    started_at: datetime,
+    universe_size: int,
+) -> None:
+    """写入运行记录 (结果/状态/数据版本可追踪)."""
+    detail = {
+        "signals": len(result.signals),
+        "passed": len(result.passed_symbols),
+        "unknown": len(result.universe_unknown),
+        "universe_size": universe_size,
+        "macro_score": (
+            result.macro_score.composite_score if result.macro_score else None
+        ),
+        "position_cap": (
+            result.macro_score.position_cap if result.macro_score else None
+        ),
+        "portfolio": [
+            {"symbol": w.symbol, "weight": round(w.final_weight, 6)}
+            for w in (result.portfolio.weights if result.portfolio else [])
+        ],
+    }
+    db.insert_run(pl.DataFrame([{
+        "run_id": result.run_id,
+        "run_type": "daily",
+        "run_date": date.fromisoformat(result.run_date),
+        "mode": result.mode,
+        "strategy_version": result.strategy_version,
+        "data_version": result.run_date,
+        "status": "ok",
+        "detail_json": json.dumps(detail, ensure_ascii=False),
+        "started_at": started_at,
+        "finished_at": datetime.now(),
+    }]))
+
+
+def _record_failed_run(db_path: str, status: str, error: str) -> None:
+    """失败/阻断运行也留痕 (spec §6.5: 运行状态可区分; 不静默失败)."""
+    now = datetime.now()
+    run_id = f"daily-{now:%Y%m%d}-{now:%H%M%S}-{status}"
+    try:
+        db = DuckDBManager(db_path)
+        try:
+            db.insert_run(pl.DataFrame([{
+                "run_id": run_id,
+                "run_type": "daily",
+                "run_date": date.today(),
+                "status": status,
+                "detail_json": json.dumps({"error": error}, ensure_ascii=False),
+                "started_at": now,
+                "finished_at": now,
+            }]))
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("失败运行记录写入失败")
+
+
+# ------------------------------------------------------------------
+# 目标组合 (四类记录之 Target; M2b)
+# ------------------------------------------------------------------
+
+def _step_persist_target(
+    db: DuckDBManager,
+    result: PipelineResult,
+    universe_symbols: list[str],
+) -> None:
+    """写入目标组合: 完整权重 (含现金 __CASH__) + 版本字段 + 原因.
+
+    新目标生效后, 引用旧目标的开放建议标记已替代 (spec §3.2).
+    """
+    weights = {
+        w.symbol: round(w.final_weight, 6)
+        for w in (result.portfolio.weights if result.portfolio else [])
+    }
+    cash_weight = round(1.0 - sum(weights.values()), 6)
+    pool_version = result.pool_version
+    if not pool_version:
+        pool_digest = hashlib.sha1(
+            "|".join(sorted(universe_symbols)).encode("utf-8"),
+        ).hexdigest()[:10]
+        pool_version = f"uv-{pool_digest}"
+
+    macro = result.macro_score
+    macro_part = (
+        f"macro={macro.composite_score:.0f}({macro.regime},cap={macro.position_cap:.0%})"
+        if macro else "macro=-"
+    )
+    reason = (
+        f"{macro_part}; scope={result.macro_scope}; "
+        f"risk={result.risk_report.message if result.risk_report else '-'}"
+    )
+
+    db.upsert_target(pl.DataFrame([{
+        "target_id": result.target_id,
+        "strategy_id": "five-funnel",
+        "strategy_version": result.strategy_version,
+        "mode": result.mode,
+        "as_of": date.fromisoformat(result.run_date),
+        "decision_time": datetime.now(),
+        "data_version": result.run_date,
+        "pool_version": pool_version,
+        "config_version": result.strategy_version,
+        "reason": reason,
+    }]))
+
+    weight_rows = [
+        {"target_id": result.target_id, "symbol": symbol, "target_weight": weight}
+        for symbol, weight in weights.items()
+    ]
+    weight_rows.append({
+        "target_id": result.target_id,
+        "symbol": "__CASH__",
+        "target_weight": cash_weight,
+    })
+    db.replace_target_weights(result.target_id, pl.DataFrame(weight_rows))
+
+    replaced = db.mark_targets_replaced(result.target_id)
+    if replaced:
+        logger.info("新目标生效: %d 条旧建议标记 replaced", replaced)
 
 
 # ------------------------------------------------------------------
@@ -717,8 +890,11 @@ def _load_universe(settings: dict) -> list[dict]:
 # T0.8: 信号推送 (CLI 成功后调用)
 # ------------------------------------------------------------------
 
-def _push_signals(settings: dict, result: PipelineResult) -> None:
-    """推送信号到移动端; 失败只告警, 不影响退出码 (信号已落库)."""
+def _push_signals(settings: dict, result: PipelineResult, db_path: str) -> None:
+    """推送信号到移动端; 失败只告警, 不影响退出码 (信号已落库).
+
+    推送结果持久化到运行记录 (runs.push_ok/attempts/error) 并结构化日志留痕.
+    """
     from orchestration.notifier import push_pipeline_result
 
     try:
@@ -726,13 +902,25 @@ def _push_signals(settings: dict, result: PipelineResult) -> None:
     except Exception:
         logger.exception("信号推送异常 (信号已落库, 不影响流程成败)")
         return
-    if push_result.ok:
-        logger.info(
-            "信号已推送到手机 (channel=%s, 尝试 %d 次)",
-            push_result.channel, push_result.attempts,
-        )
-    else:
-        logger.warning("信号推送未完成: %s", push_result.error)
+    level = logging.INFO if push_result.ok else logging.WARNING
+    logger.log(
+        level,
+        "push_result ok=%s channel=%s attempts=%d error=%s",
+        push_result.ok, push_result.channel,
+        push_result.attempts, push_result.error,
+    )
+    if result.run_id:
+        try:
+            run_db = DuckDBManager(db_path)
+            try:
+                run_db.update_run_push(
+                    result.run_id, push_result.ok,
+                    push_result.attempts, push_result.error,
+                )
+            finally:
+                run_db.close()
+        except Exception:
+            logger.exception("运行记录推送状态更新失败 (不影响退出码)")
 
 
 # ------------------------------------------------------------------
@@ -767,12 +955,14 @@ def main() -> None:
         # Windows GBK 控制台无法编码 emoji, 重配 stdout 防 UnicodeEncodeError
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         print(result.summary())
-        _push_signals(settings, result)
-    except DataQualityError:
+        _push_signals(settings, result, str(db_path))
+    except DataQualityError as exc:
         logger.exception("数据质检阻断, 流程终止")
+        _record_failed_run(str(db_path), "blocked", str(exc)[:500])
         sys.exit(2)
-    except Exception:
+    except Exception as exc:
         logger.exception("每日流程执行失败")
+        _record_failed_run(str(db_path), "failed", repr(exc)[:500])
         sys.exit(1)
 
 

@@ -80,10 +80,17 @@ def build_message(result: PipelineResult, settings: dict) -> tuple[str, str]:
     holds = [s for s in result.signals if s.direction == "HOLD"]
 
     title = f"Quant-Pilot 每日信号 {result.run_date}"
+    if result.mode != "real":
+        title += " · 研究模式"
     if not actionable:
         title += " — 无操作"
 
-    lines: list[str] = []
+    lines: list[str] = [
+        f"🧪 {result.mode} | 策略版本 {result.strategy_version} | "
+        f"数据截止 {result.run_date} | 宏观scope {result.macro_scope}",
+        "⚠️ 无真实账户接入: 以下为策略目标, 非成交/持仓记录",
+        "",
+    ]
 
     macro = result.macro_score
     if macro is not None:

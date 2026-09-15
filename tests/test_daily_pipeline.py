@@ -187,6 +187,9 @@ class TestFullPipeline:
         db = DuckDBManager(db_path)
         n_signals = db.get_table_count("trade_signals")
         assert n_signals == len(result.signals)
+        # 信号携带策略版本 (A0-1)
+        latest = db.get_latest_signals()
+        assert set(latest["strategy_version"].to_list()) == {"v0.2"}
         # OHLCV 全量入库
         assert db.get_table_count("ohlcv_daily") == len(full_df)
         db.close()
@@ -437,6 +440,18 @@ class TestSignalDebounce:
         assert sig.target_weight == pytest.approx(0.101)
         assert "首次建仓" in sig.trigger_reason
 
+    def test_stale_symbol_holds_instead_of_sell(self):
+        """停牌/无有效价格: prev 10% 今日被剔除 → HOLD 保留原目标 (无法卖出)."""
+        signals = _step_generate_signals(
+            _mk_portfolio({}), _mk_risk(), _mk_score(),
+            _mk_prev({"A": 0.10}), 0.15,
+            stale_symbols={"A"},
+        )
+        sig = {s.symbol: s for s in signals}["A"]
+        assert sig.direction == "HOLD"
+        assert sig.target_weight == pytest.approx(0.10)
+        assert "停牌" in sig.trigger_reason
+
 
 class TestRiskExitIntegration:
     """ATR 止损在完整流程中剔除标的且不产生回补 BUY."""
@@ -575,3 +590,81 @@ class TestMacroScope:
         assert a_sum == pytest.approx(0.6, abs=1e-6)
         assert w["518880"] == pytest.approx(0.2, abs=1e-6)
         assert result.total_weight == pytest.approx(0.8, abs=1e-6)
+
+
+# ------------------------------------------------------------------
+# 运行记录 (runs 表; A0-2 / M2)
+# ------------------------------------------------------------------
+
+class TestRunRecord:
+    def test_run_row_written(self, settings, db_path, full_df):
+        fetcher = FakeFetcher(full_df)
+        result = run_daily_pipeline(settings, db_path, fetcher=fetcher)
+
+        db = DuckDBManager(db_path)
+        try:
+            run = db.get_run(result.run_id)
+            assert run is not None
+            assert run["status"] == "ok"
+            assert run["run_type"] == "daily"
+            assert run["mode"] == "research"
+            assert run["strategy_version"] == "v0.2"
+            assert run["data_version"] == result.run_date
+            assert run["push_ok"] is None  # 推送状态由 CLI 推送路径更新
+        finally:
+            db.close()
+
+
+# ------------------------------------------------------------------
+# 跨境 NAV 门槛 (M3: 缺 NAV → 禁新买)
+# ------------------------------------------------------------------
+
+class TestCrossBorderNavGate:
+    def test_cross_border_blocked_from_new_buys_without_nav(self, tmp_path):
+        """缺 NAV: 跨境禁新买 (unknown 记录), A 股不受影响 (spec §4.4)."""
+        settings = make_settings(["510300", "513100"])
+        settings["universe"] = {
+            "broad_base": [
+                {"symbol": "510300", "name": "沪深300ETF",
+                 "market_type": "A股", "settlement": "T+1"},
+            ],
+            "cross_border_commodity": [
+                {"symbol": "513100", "name": "纳指ETF",
+                 "market_type": "跨境", "settlement": "T+0"},
+            ],
+        }
+        db_path = str(tmp_path / "gate.duckdb")
+        full = make_synthetic_ohlcv(["510300", "513100"])
+        result = run_daily_pipeline(settings, db_path, fetcher=FakeFetcher(full))
+
+        assert "513100" not in result.passed_symbols
+        assert "510300" in result.passed_symbols
+        assert "513100" in result.universe_unknown
+
+
+# ------------------------------------------------------------------
+# 目标组合 (targets 表; M2b)
+# ------------------------------------------------------------------
+
+class TestTargetRecord:
+    def test_target_persisted_with_cash_weight(self, settings, db_path, full_df):
+        fetcher = FakeFetcher(full_df)
+        result = run_daily_pipeline(settings, db_path, fetcher=fetcher)
+
+        db = DuckDBManager(db_path)
+        try:
+            target = db.get_target(result.target_id)
+            assert target is not None
+            assert target["strategy_version"] == "v0.2"
+            assert target["mode"] == "research"
+            assert str(target["as_of"]) == result.run_date
+            assert target["data_version"] == result.run_date
+            assert target["pool_version"]
+            assert target["reason"]
+
+            weights = db.get_target_weights(result.target_id)
+            total = sum(weights["target_weight"].to_list())
+            assert total == pytest.approx(1.0, abs=1e-6)  # 含现金权重
+            assert "__CASH__" in weights["symbol"].to_list()
+        finally:
+            db.close()

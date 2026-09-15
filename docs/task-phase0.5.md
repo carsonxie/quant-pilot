@@ -13,9 +13,9 @@
 | 批次 | 工作 | 前置 | 状态 |
 | --- | --- | --- | --- |
 | M0 | 仓库核对、C01–C23 初审、任务拆分 | 新文档就位 | ✅ 完成（`docs/phase0.5-audit.md`） |
-| M1 | A 类纠偏 + Phase 0 收尾（A0-1…A0-6） | M0 | [~] M1-1 ✅ / M1-2 ✅ / M1-3 待启动 |
-| M2 | 存储迁移、账户事件与四类记录 | M1 | [ ] |
-| M3 | 数据时点与 ETF 四层池 | M2 契约 | [ ] |
+| M1 | A 类纠偏 + Phase 0 收尾（A0-1…A0-6） | M0 | ✅ 完成（含 AGENTS.md v3.0，2026-09-14） |
+| M2 | 存储迁移、账户事件与四类记录 | M1 | ✅ 完成（M2a+M2b, 2026-09-14） |
+| M3 | 数据时点与 ETF 四层池 | M2 契约 | ✅ 完成（2026-09-14） |
 | M4 | 目标、风险与调仓建议统一 | M2、M3 | [ ] |
 | M5 | B0/B1 与主动策略对照接入 | M4 + 可信回测 | [ ] |
 | M6 | 基础绩效、实验追踪与展示 | M5 | [ ] |
@@ -27,12 +27,12 @@
 
 ## 1. Phase 0 收尾补项（A0 系列，全部随 M1 关闭）
 
-- [~] **A0-1 策略/数据版本标识**（来源：§8.1 推送证据项；C19/C20 相关）
-  - 产出：settings 研究模式标识（`project.mode: research`）、策略版本（`project.strategy_version: v0.2`）随 daily 结果/summary 输出（M1-1 ✅）；推送/面板接线待 M1-3-02。
-  - 验收：新信号、推送正文、面板均可见策略版本与数据截止时间；旧记录不被覆盖。
-- [ ] **A0-2 推送数据时间与失败可追踪**（来源：§8.1）
-  - 产出：推送含数据截止日（数据时间）；推送结果结构化落日志/（M2 起入库 run 记录）；token 缺失安全跳过保持。
-  - 验收：模拟发送（测试通道/mock）验证含数据时间与版本；失败状态含尝试次数与原因。
+- [x] **A0-1 策略/数据版本标识**（来源：§8.1 推送证据项；C19/C20 相关）
+  - 产出：`project.mode/strategy_version` 随 daily 输出（M1-1）；信号携带 `strategy_version` 列（schema v2 迁移+旧记录标注 v0.1）；推送与面板展示数据截止与版本；面板信号表"版本"列。
+  - 证据：`TestSchemaMigration` 3 例、`test_header_has_mode_version_and_data_cutoff`、AppTest 字幕断言、副本混版共存记录（09-11=v0.2、旧日=v0.1）。
+- [x] **A0-2 推送数据时间与失败可追踪**（来源：§8.1）
+  - 产出：推送含数据截止/版本/模式；推送结果结构化日志（ok/channel/attempts/error），M2 起入库 run 记录；token 缺失安全跳过保持。
+  - 证据：`test_header_has_mode_version_and_data_cutoff`；`_push_signals` 结构化日志字段。
 - [x] **A0-3 回测独立手工期望值**（来源：§8.1、§9.1；C05/C08）
   - 产出：现金/份额/费用/下一可交易时段的独立手工对账用例（不复制实现输出）。
   - 证据：`test_round_trip_manual_reconciliation`（期末 109,752.51125 手工值）、`TestLotAndCashAvailability`（批次/可取/跳空/无价不成交）、M1-1 最低收费用例。
@@ -42,9 +42,9 @@
 - [x] **A0-5 批次可卖与场景证据**（来源：§8.1；C05）
   - 产出：买入批次（lot）级可卖时间；现金可用/可取分离；现金不足、无有效价格不成交、部分成交不超卖场景测试。
   - 证据：`_Lot`/`_Position` 批次模型 + `TestLotAndCashAvailability`；nav 增加 `cash_withdrawable`。
-- [ ] **A0-6 面板/推送模拟状态标注**（来源：§8.1；C03）
-  - 产出：面板明确"研究/模拟；无真实账户接入；信号非成交"；推送注明模拟性质。
-  - 验收：面板文案与测试断言；不声称真实资金已执行。
+- [x] **A0-6 面板/推送模拟状态标注**（来源：§8.1；C03）
+  - 产出：面板"研究/模拟模式"横幅、字幕与章节改名；推送头部"无真实账户接入，非成交/持仓记录"。
+  - 证据：AppTest 横幅/字幕断言；`test_header_has_mode_version_and_data_cutoff`。
 
 ---
 
@@ -82,50 +82,61 @@
 - [x] **M1-2-05 C09/A0-4 分红与复权限制标注**（依赖：无）
   - 产出：`CALIBER_NOTE`（不复权、不含分红/权益事件）进入 `BacktestResult.summary()` 与回测 CLI 报告；`fetch-data` 全量导入增加产品感知质检摘要（不阻断，历史权益事件可见）。证据：回测输出头；审计 C09 记录真实拆分事件清单。
 
-### M1-3 标注、面板与收尾
+### M1-3 标注、面板与收尾 ✅ 2026-09-14（含 AGENTS.md v3.0）
 
-- [ ] **M1-3-01 C03 部分：模式与真假区分标注**（依赖：M1-1-01）
-  - 产出：daily summary/推送/面板显示 mode=research 与"无真实账户；目标非成交"；面板"建议目标持仓"命名校正。
-  - 验收：面板测试断言模拟标识；推送正文含标识。
-- [ ] **M1-3-02 A0-1/A0-2 数据时间与策略版本落地**（依赖：M1-3-01）
-  - 产出：推送标题/正文含数据截止日与策略版本；推送失败记录（结构化日志，M2 入库）。
-  - 验收：mock 推送断言字段；失败含 attempts/error。
-- [ ] **M1-3-03 C13/C19 文档处置**（依赖：用户确认）
-  - 产出：AGENTS.md 修订草案（前复权→研究/成交价分离、佣金≥0.15%→实际/标注费率、对数收益→按用途声明、旧滑点→压力情景）；旧 task 验收作废登记（见 §9）。
-  - 验收：用户确认后更新 AGENTS.md；确认前保持草案状态。
-- [ ] **M1-3-04 策略重跑与新旧口径并列**（依赖：M1-1、M1-2 修正完成）
-  - 产出：新日期 run 生成 v0.2 目标（旧 3 个信号日保留标注）；受影响回测/报告重跑并列新旧。
-  - 验收：`uv run daily`（token 未配置安全跳过）输出 v0.2 信号；数据库旧记录不变；审计表迁移影响列更新。
-- [ ] **M1-3-05 M1 收尾核对**（依赖：全部 M1）
-  - 产出：§8.1 证据清单逐项打勾（引用测试/运行记录）；`phase0.5-audit.md` 状态更新；PROJECT_MEMORY 记录。
-  - 验收：A 类相关项状态为"已修正-已验证"；无未记录差异。
+- [x] **M1-3-01 C03 部分：模式与真假区分标注**（依赖：M1-1-01）
+  - 产出：daily 摘要含 mode/版本/数据截止/scope；推送头部"🧪 research 模式 | 策略版本 | 数据截止 | 无真实账户接入，非成交/持仓记录"；面板顶部"研究/模拟模式"横幅、字幕"数据截止/信号策略版本/信号非成交"、表列"版本"、章节改名"策略目标持仓（模拟，非实际持仓）"。
+  - 证据：`test_header_has_mode_version_and_data_cutoff`；AppTest 断言横幅与字幕；`test_signal_table_columns_and_format`。
+- [x] **M1-3-02 A0-1/A0-2 数据时间与策略版本落地**（依赖：M1-3-01）
+  - 产出：`trade_signals.strategy_version`（schema v2 迁移，旧记录标注 v0.1，实时库已迁移并核对内容不变）；推送与面板展示数据截止与版本；推送结果结构化留痕 `push_result ok/channel/attempts/error`（持久化运行记录 M2）。
+  - 证据：`TestSchemaMigration` 3 例；`test_first_run_produces_signals` 版本断言；副本网络重跑显示 09-11=v0.2、旧日=v0.1 共存。
+- [x] **M1-3-03 C13/C19 文档处置**（依赖：用户确认）
+  - 产出：AGENTS.md **已更新至 v3.0**（§5.2 #2–#6、§7 #2–#5、§8 #4、§10；审计 §4.1 保留对照表）；C19 旧 task 验收作废登记（§9 既有）。
+  - 证据：AGENTS.md §10 v3.0 行；用户 2026-09-14 确认记录。
+- [x] **M1-3-04 策略重跑与新旧口径并列**（依赖：M1-1、M1-2 修正完成）
+  - 产出：真实库备份（`data/backups/quant_pilot_20260914.duckdb` + 迁移前信号 CSV）→ 隔离副本演练 → 真实库迁移（11 条旧信号标注 v0.1，内容逐行不变）→ 副本真实网络重跑（09-11 生成 v0.2，旧日保留 v0.1）。当前无新交易日数据（最新 2026-09-11），真实库 v0.2 将在下一交易日 daily 运行自然生成（不重跑旧信号日）。
+  - 证据：迁移前后 counts/sum/行内容比对输出；副本运行记录；备份文件。
+- [x] **M1-3-05 M1 收尾核对**（依赖：全部 M1）
+  - 产出：§8.1 证据清单逐项核对（见审计 §1 更新）；A 类相关项状态更新；PROJECT_MEMORY 记录。
+  - 证据：审计 §1 全绿（推送/面板行与模拟状态行闭合）；全量 280/280。
 
 ---
 
-## 3. M2 — 存储迁移、账户事件与四类记录
+## 3. M2 — 存储迁移、账户事件与四类记录（[~] M2a ✅ / M2b 待启动）
 
 前置：M1 完成。产出：可信账户可回放，导入/反馈幂等，真实与模拟分离。
 
-- [ ] **M2-01 四类对象与事件接口契约**（按 plan §M2 表；`docs/` 或代码 docstring 记录）
-- [ ] **M2-02 schema 迁移 v2（隔离副本演练）**：account、account_event、position_lot、account_snapshot、target/target_weight、proposal、execution_feedback、instrument、universe_version、run、experiment、schema_migration；只增表/列，兼容旧读接口
-- [ ] **M2-03 统一写入口与事务**：重复导入不产生第二笔事件；并发导入/日任务明确协调（C21）
-- [ ] **M2-04 事件类型**：初始状态/入金/出金/成交/费用/分红应收与到账/份额变动/更正；手动 + 标准 CSV 导入
-- [ ] **M2-05 可信起点与回放**：状态由事件生成；来源不明历史信号不得迁移为真实成交；mode/account 隔离；通知/查看不产生成交
-- [ ] **M2-06 备份与迁移保护**：停止写入或一致方式下备份 + manifest（schema/行数/份额/现金）；隔离副本演练；失败不得留半笔事件（plan §5）
-- [ ] **M2-07 测试**：部分成交、未执行、重复导入、出入金、更正事件；样本案例（§11）
+### M2a 账户层 ✅ 2026-09-14
+
+- [x] **M2-01 事件接口契约**：见 `src/data_pipeline/accounting.py` 模块 docstring（事件类型/字段/现金可用与可取/更正语义/确定性去重）
+- [x] **M2-02a schema v3（隔离副本演练 ✅）**：accounts / account_events / position_lots / account_snapshots / targets / target_weights / trade_proposals / execution_feedback / runs / experiments / schema_migration_log 已建；真实库已迁移（pre_v3 备份 → 副本演练 → 真实库，幂等且内容不变）。`instrument`/`universe_version` 归 M3（原列表在此修正）
+- [x] **M2-03 统一写入口与事务**：`AccountService.import_events`（事件→回放→批次/快照同一事务；重复导入不产生第二笔；失败回滚不留半笔）；多进程并发协调文档归 M2b/M7（C21）
+- [x] **M2-04a 账户事件类型**：initial/deposit/withdrawal/trade/fee/dividend_accrual/dividend_payment/share_change/correction；标准 CSV + `uv run account-import`；模板 `docs/account_events_template.csv`
+- [x] **M2-05a 回放与隔离**：FIFO 批次、T+1 可取、应收不双计、账户/mode 隔离；"通知/查看不产生成交"（无此类写入路径）
+- [x] **M2-06a 备份与演练**：`data/backups/quant_pilot_20260914_pre_v3.duckdb` + 副本演练 + 核对摘要（schema_migration_log.checks_json）
+- [x] **M2-07a 测试（账户层）**：28 项新增（去重/回滚/隔离/更正/份额变动/分红/CSV/模板/运行记录），全量 308/308；CLI 演示：同一 CSV 两次导入 → 新增 10 / 去重 10，现金与持仓手工可核对
+
+### M2b 四类记录其余三层 + 样本 ✅ 2026-09-14
+
+- [x] **M2-01b target/target_weight 持久化**：daily 写 `targets`（target_id/strategy_id=five-funnel/版本/mode/as_of/decision_time/data·pool·config 版本/原因）+ 完整权重（含现金 `__CASH__`，和为 1）；池版本用标的集哈希。证据：`TestTargetRecord`（含现金权重断言）+ 真实数据副本干跑（`pool_version=universe-19etf-abc0b4d5`、weights Σ=1、cash=1.0）。
+- [x] **M2-02b proposal/execution_feedback**：`src/orchestration/proposal_ledger.py`（建议去重、状态机 proposed→partial→filled + rejected/expired/replaced、部分成交累计、超额告警保留事实、反馈幂等、反馈→账户联动入账（可关）、非系统交易入账、新目标替代旧建议）。证据：`tests/test_proposal_ledger.py` 14 项。
+- [x] **M2-03b 样本案例**：部分成交（600+400 两笔 → 状态与现金逐项期望值）、未执行（状态保持、不入账）、重复导入（feedback_id/event_id 双层去重）、出入金（M2a）。证据：`TestFeedbackFlow` / `TestReplayBasics`。
+- [x] **M2-04b 手动录入说明与并发协调**：README"账户事件录入"节（CSV/CLI/事件类型/单通道原则/单写进程约束）；HANDOFF 同步。
 
 ---
 
-## 4. M3 — 数据时点与 ETF 四层池
+## 4. M3 — 数据时点与 ETF 四层池（✅ 完成 2026-09-14）
 
 前置：M2 版本/状态契约。
 
-- [ ] **M3-01 产品与规则契约**：available_at、生效区间、交易规则、费率生效期；`instrument`/`universe_version`
-- [ ] **M3-02 四层池**：AllocationUniverse / ProductUniverse / TradableUniverse(pass/fail/unknown/not_applicable) / Holdings；买卖许可与原因
-- [ ] **M3-03 历史池版本**：成员生效区间与来源；历史回测用当时版本；不可重建标"条件性研究"；当时未上市不可买
-- [ ] **M3-04 代理与宽度**：ETF 代理宽度准确命名；数据不足时不冒称全 A（与 M1-2-02 衔接）
-- [ ] **M3-05 缺失与修订**：缺 NAV 禁新买、停牌保留持仓与估值；复权修订使相关缓存失效/新版本（C09/C10/C12）
-- [ ] **M3-06 产品对照与相关性诊断**：报告窗口/样本/未知字段；不按单一阈值自动删池（C15 数据侧）
+- [x] **M3-01 产品与规则契约**：schema v4 新增 `instruments`（交易所/市场类型/资产类别/指数/上市日近似/结算/涨跌幅限制/溢价检查必需标记/来源）与 `universe_versions`/`universe_members`（成员生效区间）与 `nav_daily`；`sync_instruments_and_pool` 从 settings+数据派生同步（幂等，内容哈希版本 `uv-…`，出池标注区间不删历史）。证据：`TestSyncPool` 3 例 + 真实库 v4 迁移（备份/演练/应用）+ 真实干跑（19 产品、池版本 uv-abc0b4d53f）。
+- [x] **M3-02 四层池**：`src/strategies/etf_pool.py` — 层1 配置范围（settings+instruments）、层2 产品对照（M3-06）、层3 当日可交易池（pass/fail/unknown/not_applicable；can_buy/can_sell/can_hold 与原因；禁买≠清仓）、层4 持仓参数独立于筛选。daily 已接入 buyable 列表（`PipelineResult.passed_symbols`）。证据：`TestTradableUniverse` 7 例。
+- [x] **M3-03 历史池版本**：成员生效区间 + `member_buyable_at`（上市日前不可买；版本声明日前标 `conditional_research`）；`membership_mode` 进入池报告。证据：`TestHistoricalMembership` 3 例 + 出池关闭测试。
+- [x] **M3-04 代理与宽度**：M1-2 已完成命名与 scope；M3 保持（池报告含数据新鲜度，不冒称全 A）。
+- [x] **M3-05 缺失与修订**：缺 NAV 且产品要求溢价检查（settings.universe_filter.premium_check_required_market_types，默认跨境）→ unknown → **禁新买**、持仓保留（真实干跑：5 只跨境禁买）；停牌/无当日价格 → 禁买禁卖、持仓保留并按最近价估值；信号层停牌持仓 **HOLD 保留原目标**（不盲目 SELL）。复权修订：以 pool/data 版本字段留痕（完整权益事件入账仍待 M2 扩展/P1）。证据：`TestTradableUniverse`（stale/nav）、`test_stale_symbol_holds_instead_of_sell`、`TestCrossBorderNavGate`。
+- [x] **M3-06 产品对照与相关性诊断**：`src/strategies/product_compare.py` — 相关矩阵（共同交易日逐点对齐、报告窗口/样本/跳过原因）、同指数分组、对照表（波动/区间收益/日均额/样本标注）；不按阈值自动删池。证据：`tests/test_product_compare.py` 7 例（相同序列=1、镜像收益=−1、样本不足 skipped）。
+
+**M3 已知限制/解锁路径**：跨境 ETF 新增买入被 NAV unknown 门槛阻止（spec §4.4 保守设计）；解锁需接入 NAV 数据（I-03，P1 或专项任务）。
 
 ---
 
@@ -228,3 +239,7 @@
 | 2026-09-14 | M0：创建本文件（Phase 0 补项 A0-1…A0-6 + M1–M7 原子任务 + 验收对照 + 样本案例映射）。 |
 | 2026-09-14 | M1-1 完成：C01/C04/C08 修正并验证；A0-1 部分（daily 结果已含 mode/版本）；净增 18 项测试，260/260 通过；真实回测验收保持。 |
 | 2026-09-14 | M1-2 完成：C05/C06/C09/C10/C11 修正与证据；A0-3/A0-4/A0-5 完成（A0-4 限标注待 M2 复核）；新增 16 项测试，276/276 通过；真实回测 + 副本干跑验证。 |
+| 2026-09-14 | M1-3 完成：推送/面板模拟标注与版本落地（schema v2 迁移）；真实库备份+迁移+副本网络重跑；§8.1 收尾核对；280/280 通过。 |
+| 2026-09-14 | AGENTS.md 更新至 v3.0（用户确认）：§5.2 #2–#6、§7、§8 #4、§10 与 spec v3.0 对齐；C13 关闭。 |
+| 2026-09-14 | M2a 完成：账户账本（事件/回放/更正/去重/事务）、schema v3（备份+演练+真实库迁移）、CSV+CLI 录入、runs 运行记录；28 项新测试 → 308/308。 |
+| 2026-09-14 | M2b 完成：target/target_weight 落库（含现金权重/版本）、proposal/feedback 状态机与账户联动、样本案例、录入手册（README）；15 项新测试 → 323/323。**M2 全部完成**。 |

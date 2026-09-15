@@ -11,11 +11,11 @@
 | 字段                   | 值                                                                  |
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
-| **当前 Phase**   | Phase 0.5 — M1 进行中（M1-1 ✅ 公式/成本修正；M1-2 数据/时序证据 待启动）                                                      |
-| **当前 Task**    | `docs/task-phase0.5.md`（M1-1 ✅ / M1-2 ✅；M1-3 待启动） |
-| **Phase 进度**   | Phase 0 代码 T0.1~T0.10 ✅ / §8.1 收尾补项 6 组（A0-3/4/5 ✅，A0-1 部分，A0-2/A0-6 待 M1-3） |
-| **Gate 状态**    | 旧口径 6/6 ✅；spec §8.7 三 Gate 体系下 Phase 0 收尾未完成（证据缺口登记于 `docs/phase0.5-audit.md`）                                 |
-| **最后更新**     | 2026-09-14 (M1-2 完成: C05/C06/C09/C10/C11 修正, 276/276 测试, 待启动 M1-3) |
+| **当前 Phase**   | Phase 0.5 — **M3 完成**（四层池/产品契约/NAV 门槛）→ M4 待启动 |
+| **当前 Task**    | `docs/task-phase0.5.md`（M1 ✅；M2 ✅；M3 ✅；M4 待启动） |
+| **Phase 进度**   | Phase 0 代码 T0.1~T0.10 ✅ / §8.1 收尾补项 6 组 ✅（A0-1…A0-6 全部闭合；推送失败持久化转 M2） |
+| **Gate 状态**    | 旧口径 6/6 ✅；spec §8.7 三 Gate 体系下 Phase 0 收尾证据已闭合（`docs/phase0.5-audit.md` §1 全绿）                                 |
+| **最后更新**     | 2026-09-14 (M3 完成: 四层池/产品契约/NAV 门槛, 346/346 测试, M4 待启动) |
 
 ---
 
@@ -278,6 +278,73 @@
 - **影响范围**: validator, universe_filter, macro_timing, daily_pipeline, custom_loop, akshare_fetcher, settings, dashboard; audit C05/C06/C09/C10/C11
 - **后续动作**: M1-3 (C03 标注/面板模拟、A0-1/A0-2 推送与数据时间、C13 草案、策略重跑 v0.2、§8.1 收尾核对)
 
+### EV-018 — M1-3: 模拟标注、Schema v2 与 M1 收尾 ✅
+
+- **日期**: 2026-09-14
+- **类型**: 关键修正 (C03 部分/A0-1/A0-2/A0-6) / schema 迁移 / Phase 0 收尾
+- **描述**: Phase 0.5 M1-3 交付:
+  - **标注 (C03/A0-6)**: daily 摘要含 mode/版本/数据截止/scope; 推送头部"🧪 research | 策略版本 | 数据截止 | 无真实账户接入, 非成交/持仓记录"; 面板顶部模拟横幅 + 字幕 + "版本"列 + "策略目标持仓（模拟，非实际持仓）"
+  - **推送 (A0-2)**: 结构化留痕 `push_result ok/channel/attempts/error`（M2 转运行记录持久化）
+  - **Schema v2**: `trade_signals.strategy_version`; 迁移只增列+旧记录标注 v0.1（不覆盖事实）; `upsert_signals` 兼容旧调用且 COALESCE 保护既有版本
+  - **真实库迁移 (plan §5)**: 备份 `data/backups/quant_pilot_20260914.duckdb` + 迁移前信号 CSV → 隔离副本演练 → 真实库迁移（11 条旧信号 → v0.1, 内容逐行不变, schema_version [1,2]）→ 副本真实网络重跑（09-11 v0.2, 旧日 v0.1; 当前无新交易日数据, 真实库 v0.2 待下一交易日 daily 自然生成）
+  - **§8.1 收尾**: 证据清单 7 行全部闭合（推送/面板行、模拟状态行 → ✅）
+  - **C13**: AGENTS.md 修订草案提交至审计 §4.1（7 处条款对照），**待用户确认后更新本体**
+- **验证**: 全量 **280/280**; ruff 零新增; 迁移前后 counts/sum/行内容比对一致
+- **影响范围**: notifier, daily_pipeline, dashboard, duckdb_manager, akshare_fetcher(fetch-data 提示), tests; audit §1/§4
+- **后续动作**: 用户确认 AGENTS 修订 → **M2**（账户/四类记录/schema 迁移 v3）
+
+### EV-019 — AGENTS.md v3.0 修订（C13 关闭）🔴
+
+- **日期**: 2026-09-14
+- **类型**: 仓库规则文件修订（用户确认后执行）
+- **描述**: 按 spec v3.0 与审计 §4.1 对照表更新 `AGENTS.md`（v2.0 → v3.0）:
+  - §5.2 #2 收益率口径按用途声明（组合核算用算术收益）; #3 价格口径按用途分离（研究序列/成交账本/复权版本化, 不复权限制标注）; #4 成本按实际或标注研究配置（旧滑点公式=命名旧压力情景 legacy_stress; 不得二次扣费）; #5 连续/布尔信号均可（须声明、可复现、经验证; 风险退出不被带宽压制）; #6 因子须平稳化/可比（ADF 等按用途采纳）
+  - §7 检查清单 #2–#5、§8 禁止事项 #4 同步; §10 追加 v3.0 版本记录行
+- **影响范围**: `AGENTS.md`（宪法级）; 后续所有批次开发口径; 审计 C13 → **已修正-已验证**; I-04/I-07 相应关闭
+- **后续动作**: M2 起以 AGENTS v3.0 + spec v3.0 为准实施
+
+### EV-020 — M2a: 账户账本、schema v3 与运行记录 🟡
+
+- **日期**: 2026-09-14
+- **类型**: M2 里程碑（账户层）/ schema 迁移
+- **描述**: M2a 交付:
+  - **事件契约**: `src/data_pipeline/accounting.py`（9 类事件; 现金可用≠可取; 更正替换语义; 确定性去重 ID; 批次可卖）
+  - **schema v3**: 11 张新表（账户/事件/批次/快照/目标/建议/反馈/运行/实验/迁移日志）; `schema_migration_log` 记录演练核对摘要; 真实库已迁移（pre_v3 备份 + 副本演练 + 幂等; 内容不变）
+  - **统一写入口**: `AccountService.import_events` 同一事务（插入→回放→批次/快照）; 失败回滚不留半笔
+  - **用户录入通道**: 标准 CSV（模板 `docs/account_events_template.csv`）+ CLI `uv run account-import`; 重复导入自动去重（演示: 首次新增 10, 二次跳过 10）
+  - **运行记录**: daily 流程写 runs（结果/版本/状态）; 推送结果持久化 `push_ok/attempts/error`（失败/阻断运行也留痕）
+- **验证**: 28 项新测试 → 全量 **308/308**; ruff 与基线持平（新增代码零告警）; 真实库迁移演练与 CLI 演示通过
+- **影响范围**: accounting.py（新）, duckdb_manager, daily_pipeline, pyproject（account-import）, docs 模板; audit C20/C21 部分进度
+- **后续动作**: **M2b**（target/proposal/feedback + 部分成交/未执行样本 + 并发协调说明）; 用户可开始按模板录入真实账户（可选）
+
+### EV-021 — M2b: 目标/建议/反馈落库，M2 完成 🟡
+
+- **日期**: 2026-09-14
+- **类型**: M2 里程碑（四类记录闭合）
+- **描述**: M2b 交付:
+  - **Targets**: daily 写 `targets` + `target_weights`（完整权重含现金 `__CASH__`，Σ=1；版本字段 strategy_version/mode/data_version/pool_version(标的集哈希)/config_version；原因含宏观/scope/风控）
+  - **Proposals/Feedback**: `src/orchestration/proposal_ledger.py` — 建议去重落库；状态机 proposed→partial→filled / rejected / expired / replaced；反馈幂等（feedback_id）；成交类反馈联动账户入账（确定性 event_id，可 `apply_to_ledger=False` 关闭以避免与直录事件重复）；超额成交保留事实并告警；非系统交易可入账；新目标生效自动替换旧建议（`mark_targets_replaced`）
+  - **用户通道文档**: README「账户事件录入」节（CSV/CLI、单通道原则、单写进程约束）
+- **验证**: 15 项新测试 → 全量 **323/323**; ruff 新增文件零告警; 真实数据副本干跑（target pool_version=universe-19etf-abc0b4d5, weights Σ=1, cash=1.0, run ok）
+- **影响范围**: proposal_ledger.py（新）, duckdb_manager（目标/建议/反馈方法）, accounting（事务参数）, daily_pipeline（_step_persist_target）, README; audit C03/C20
+- **后续动作**: **M3**（数据时点与 ETF 四层池）; 用户可按 README 录入真实账户（可选，未录入时保持 research 模式）
+
+### EV-022 — M3: 四层池、产品契约与 NAV 门槛 🟡
+
+- **日期**: 2026-09-14
+- **类型**: M3 里程碑（数据时点与 ETF 池）/ settings 参数变更 / **行为变更**
+- **描述**: M3 交付:
+  - **schema v4**: `instruments`（19 只: 交易所/市场类型/资产类别/指数名/上市日近似/结算/涨跌幅限制/溢价必需标记）、`universe_versions`、`universe_members`、`nav_daily`；真实库已迁移（pre_v4 备份 + 副本演练 + 应用）
+  - **四层池** `src/strategies/etf_pool.py`：分项检查 pass/fail/unknown/not_applicable；can_buy/can_sell/can_hold；**禁买 ≠ 清仓**；停牌（stale）禁买卖、持仓保留并按最近价估值；池版本内容哈希 `uv-…`；出池仅标注区间不删历史
+  - **历史池判定**：`member_buyable_at`（上市日前不可买；版本声明日前标 `conditional_research`）
+  - **产品对照** `src/strategies/product_compare.py`：相关矩阵（共同交易日/窗口/样本/跳过原因）、同指数分组、对照表；不按阈值自动删池
+  - **行为变更（重要）**：缺 NAV 且溢价检查必需（默认跨境）→ **禁新买**（unknown 记录）；真实干跑：19 只中 **14 可买、5 只跨境禁买**；停牌持仓信号改为 **HOLD 保留原目标**（不盲目 SELL）
+  - **settings.yaml 变更**（原因: spec §4.3/§4.4）：universe 条目新增 `index_name`（19 只研究元数据）；universe_filter 新增 `premium_check_required_market_types: ["跨境"]`
+- **验证**: 23 项新测试 → 全量 **346/346**；ruff 新增文件零告警；真实库 v4 迁移与真实数据干跑验证
+- **影响范围**: etf_pool.py / product_compare.py（新）, universe_filter（结构化 evaluate）, daily_pipeline（池报告接入/停牌 HOLD）, duckdb_manager, settings; audit C12/C15
+- **已知限制**: 跨境新增买入被 NAV 门槛阻止 → 解锁需 NAV 数据接入（I-03）；复权修订机制随权益事件（M2 扩展/P1）落地
+- **后续动作**: **M4**（目标→建议统一：账户对比、数量规划、优先级、重新进入）
+
 ---
 
 ## 四、关键产出索引
@@ -319,11 +386,11 @@
 | :--- | :----------------------------------------------------------------------------- | :--------- | :----------------------------------------------------- | :------------------------------------------- |
 | I-01 | ~~eastmoney API 间歇性断连~~ → **已解决: 切换至 Sina 数据源** (EV-007) | 2025-07-18 | 反封锁休眠 / 代理绕过 / 指数退避重试 → 最终方案: Sina | 无需帮助                                     |
 | I-02 | Python 3.14 与 vectorbt 不兼容 (P1 需要)                                       | 2025-07-18 | vectorbt 移入 optional-deps p1 分组                    | P1 时用`uv python pin 3.12` 或 Docker 隔离 |
-| I-03 | NAV/IOPV 未入库, 溢价检查静默跳过 (EV-006)                                     | 2025-07-18 | 设计为可选数据源                                       | P0 后评估或 P1 因子期解决                   |
-| I-04 | 复权口径: AGENTS §5.2 "前复权" 条款待修订 + Sina 数据 DIY 后复权 (EV-008)     | 2025-07-19 | eastmoney 备用路径已改 hfq                             | AGENTS 下次修订 / P1 实现                   |
+| I-03 | NAV/IOPV 未入库 → M3 起**不再静默**: 跨境产品禁新买（真实干跑 14/19 可买）；解锁需接入 NAV 数据 | 2025-07-18 | M3 四层池实现 unknown→禁买（保守默认）；`nav_daily` 表已就绪 | 专项接入 NAV 数据源（P1 或提前申请） |
+| I-04 | 复权口径: ~~AGENTS §5.2 "前复权" 条款待修订~~ → ✅ AGENTS 条款已随 v3.0 修订（2026-09-14）; Sina 数据 DIY 后复权/权益事件并入 I-09 (M2/M3) 与 P1 | 2025-07-19 | eastmoney 备用路径已改 hfq; AGENTS v3.0 | M2 权益事件 / P1 复权序列实现 |
 | I-05 | 组合优化 Top-N 截断致仓位利用率低 (设计内行为, EV-011)                          | 2025-07-24 | 记录观察, P0 不改动                                    | P1 风险平价 (T1.7) 时评估                   |
-| I-06 | spec v3.0 §9 审计 A 类: C01/C04/C08 ✅ 已修正 (M1-1, 2026-09-14); C10 (固定阈值/NAV静默)/C11 (宽度命名/scope) 待 M1-2 | 2026-09-14 | M1-1 完成, 260/260 | 待确认启动 M1-2 |
-| I-07 | AGENTS.md §5.2/§7 旧条款 (前复权/佣金≥0.15%/对数收益强制/旧滑点公式) 与 spec v3.0 冲突 | 2026-09-14 | M1 将提交修订草案 (C13) | ⚠️ 涉及仓库宪法文件, 需用户确认后才更新 |
+| I-06 | spec v3.0 §9 审计 A 类: C01/C04/C08 (M1-1) + C05/C06/C09/C10/C11 (M1-2) ✅ 全部修正; C03 部分 (M1-3) ✅ | 2026-09-14 | M1 完成, 280/280 | 无 (完整四类记录/池/再平衡随 M2–M6) |
+| I-07 | ~~AGENTS.md §5.2/§7 旧条款与 spec v3.0 冲突~~ → ✅ **已修订至 v3.0**（用户 2026-09-14 确认） | 2026-09-14 | M1-3 完成 | 无 |
 | I-08 | ~~固定 \|涨跌\|>20% 阈值可能误伤 20% 板真实极端日~~ → ✅ 已解决 (M1-2 产品感知分级: 10%/20% 板 + 2pp 容差) | 2026-09-14 | M1-2-01 完成 | 无 |
 | I-09 | 历史行情含未调整权益事件跳变 (拆分/折算 10+ 处, 见 EV-017) + 2026-07-19 全量 fetch-data 绕过校验写入 | 2026-09-14 | M1-2 产品感知质检 + 口径标注; 不自动改数据 | M2 权益事件入账 / M3 数据版本; ⚠️ 增量遇拆分日会阻断, 须人工核验, **勿用全量 fetch-data 绕过** |
 
@@ -343,12 +410,12 @@
 10. ~~T0.9: 自研回测循环 v0.1~~ (已完成 — EV-013; 偏差 0.044% < 1%, 交收差一天 ✓, 20 tests)
 11. ~~T0.10: Streamlit 信号面板~~ (已完成 — EV-014; AppTest 冒烟 + headless 服务验证, 16 tests)
 12. **🎉 P0 Phase 完成 (旧口径)** (2026-09-13): 交付物 10/10, Gate 6/6
-13. **当前: Phase 0.5 — M0 初审 ✅, 待用户审阅** (2026-09-14)
-    - 产出: `docs/phase0.5-audit.md` (C01–C23 + §8.1 剩余项) + `docs/task-phase0.5.md` (A0 补项 + M1–M7 任务)
-    - 待确认: AGENTS.md 修订草案 (I-07); 用户审阅通过后启动 **M1** (A 类纠偏 + Phase 0 收尾)
-    - M1 分组: M1-1 公式/成本 (C01/C04/C08) → M1-2 数据/时序证据 (C10/C11/C05/C06/C09) → M1-3 标注/面板/收尾 (C03 部分/A0-1…A0-6)
-    - 纪律: 每小批次"实现→验证→更新审计/任务→停靠汇报", 待用户确认后进入下一节
-14. ✅ 全量测试: 242/242 通过 (2026-09-14 复测)
+13. **当前: Phase 0.5 — M3 ✅ 完成（四层池 + 产品契约 + NAV 门槛）, 待确认启动 M4** (2026-09-14)
+    - M1/M2/M3 交付: A 类纠偏 + Phase 0 收尾 + AGENTS v3.0; 账户/四类记录/schema v3; 四层池/schema v4
+    - 关键产出: 346/346 测试; `data/backups/` pre_v2/v3/v4 快照与演练; 跨境禁买（I-03 解锁路径）
+    - 下一步 M4: 目标→建议统一（共用规划器、数量/现金/可卖/优先级/有效期、band 再平衡、卖出依赖、重新进入与冷却）
+    - 纪律: 每批"实现→验证→更新审计/任务→停靠汇报", 待用户确认后进入下一节
+14. ✅ 全量测试: 280/280 通过 (2026-09-14)
 15. 📋 常用运行命令见 §七 (面板/取数/回测/测试)
 16. 参考: `docs/task-phase0.5.md`; `docs/spec.md` v3.0 §8/§9; `docs/plan.md` M1–M7
 
@@ -368,6 +435,9 @@ uv run daily
 
 # 回测 (510300 买入持有偏差验收 + T+0/T+1 交收对比)
 uv run backtest
+
+# 账户事件导入 (标准 CSV; 重复导入自动去重; 模板 docs/account_events_template.csv)
+uv run account-import --account REAL-1 --name "项目账户" --mode real --csv events.csv
 
 # Streamlit 信号面板 (默认 http://localhost:8501)
 uv run streamlit run dashboard/app.py

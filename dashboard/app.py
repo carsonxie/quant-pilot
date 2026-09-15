@@ -67,6 +67,12 @@ def main() -> None:
     names = load_symbol_names(settings)
     signal_date = str(signals["signal_date"].max())
 
+    # ---- 模拟状态声明 (C03/A0-6: 无真实账户, 目标非成交) ----
+    st.warning(
+        "🧪 研究/模拟模式：未接入真实账户。以下为策略目标，"
+        "不是成交或持仓记录，也未经对账。"
+    )
+
     # ---- 宏观状态卡 ----
     macro_df = _macro_history(db_path, MACRO_HISTORY_DAYS)
     if not macro_df.empty:
@@ -79,9 +85,17 @@ def main() -> None:
         if breadth is not None and breadth == breadth:  # NaN 防护
             c4.metric("ETF代理宽度", f"{breadth:.0%}")
 
+    sig_versions = (
+        sorted({v for v in signals["strategy_version"].to_list() if v})
+        if "strategy_version" in signals.columns
+        else []
+    )
+    version_label = "、".join(sig_versions) if sig_versions else str(
+        settings.get("project", {}).get("strategy_version", "-")
+    )
     st.caption(
-        f"信号日期 {signal_date} · 数据源 `{settings['storage']['db_path']}` · "
-        "信号仅供参考，人工审核后手动执行"
+        f"数据截止 {signal_date} · 信号策略版本 {version_label} · 运行模式 research · "
+        f"数据源 `{settings['storage']['db_path']}` · 信号非成交（人工审核后手动执行）"
     )
 
     # ---- 今日信号表 (含触发原因) ----
@@ -90,8 +104,8 @@ def main() -> None:
     if not signal_table.is_empty():
         st.dataframe(signal_table.to_pandas(), width="stretch", hide_index=True)
 
-    # ---- 建议目标持仓 ----
-    st.subheader("建议目标持仓")
+    # ---- 策略目标持仓 (模拟) ----
+    st.subheader("策略目标持仓（模拟，非实际持仓）")
     positions = build_position_view(signals, names)
     if positions.is_empty():
         st.info("当前建议空仓（全部标的的目标仓位为 0，受宏观仓位上限约束）")

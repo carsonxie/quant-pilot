@@ -148,11 +148,12 @@ class TestViews:
         names = load_symbol_names(settings)
         table = build_signal_table(load_latest_signals(seeded_db), names)
 
-        assert table.columns == ["代码", "名称", "方向", "目标仓位", "触发原因"]
+        assert table.columns == ["代码", "名称", "方向", "目标仓位", "版本", "触发原因"]
         row = table.filter(pl.col("代码") == "510050").row(0, named=True)
         assert row["名称"] == "上证50ETF"
         assert row["方向"] == "BUY"
         assert row["目标仓位"] == "15.0%"
+        assert row["版本"] == "-"  # 旧库无 strategy_version 列时的回退
         assert row["触发原因"] == "测试原因A"
 
     def test_position_view_only_positive_sorted_desc(self):
@@ -321,3 +322,8 @@ def test_streamlit_app_renders_without_exception():
     at.run()
 
     assert not at.exception
+    # C03/A0-6: 模拟状态声明与数据时间/版本可见
+    assert any("研究/模拟模式" in w.value for w in at.warning)
+    assert any(
+        "数据截止" in c.value and "策略版本" in c.value for c in at.caption
+    )

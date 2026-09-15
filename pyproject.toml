@@ -66,6 +66,7 @@ fetch-data = "data_pipeline.fetchers.akshare_fetcher:main"
 init-db = "data_pipeline.duckdb_manager:main"
 daily = "orchestration.daily_pipeline:main"
 backtest = "backtest.custom_loop:main"
+account-import = "data_pipeline.accounting:main"
 factor-check = "scripts.validate_registry:main"
 
 [tool.ruff]

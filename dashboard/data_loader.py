@@ -63,15 +63,21 @@ def universe_symbols(settings: dict) -> list[str]:
 
 
 def build_signal_table(signals: pl.DataFrame, names: dict[str, str]) -> pl.DataFrame:
-    """今日信号展示表 (中文列, 权转为百分比字符串)."""
+    """今日信号展示表 (中文列, 权转为百分比字符串; 含策略版本列)."""
     if signals.is_empty():
         return pl.DataFrame()
     df = signals.sort("symbol")
+    versions = (
+        [v if v is not None else "-" for v in df["strategy_version"].to_list()]
+        if "strategy_version" in df.columns
+        else ["-"] * df.height
+    )
     return pl.DataFrame({
         "代码": df["symbol"],
         "名称": [names.get(s, s) for s in df["symbol"]],
         "方向": df["direction"],
         "目标仓位": [f"{w:.1%}" for w in df["target_weight"]],
+        "版本": versions,
         "触发原因": df["trigger_reason"],
     })
 

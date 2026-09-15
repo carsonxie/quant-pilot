@@ -38,31 +38,31 @@ data_fetch:
 universe:
   # 宽基 ETF (T+1)
   broad_base:
-    - {symbol: "510300", name: "沪深300ETF",market_type: "A股", settlement: "T+1"}
-    - {symbol: "510050", name: "上证50ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "510500", name: "中证500ETF",market_type: "A股", settlement: "T+1"}
-    - {symbol: "159915", name: "创业板ETF",market_type: "A股", settlement: "T+1"}
-    - {symbol: "588000", name: "科创50ETF",market_type: "A股", settlement: "T+1"}
-    - {symbol: "512100", name: "中证1000ETF",market_type: "A股", settlement: "T+1"}
+    - {symbol: "510300", name: "沪深300ETF",market_type: "A股", settlement: "T+1", index_name: "沪深300"}
+    - {symbol: "510050", name: "上证50ETF", market_type: "A股", settlement: "T+1", index_name: "上证50"}
+    - {symbol: "510500", name: "中证500ETF",market_type: "A股", settlement: "T+1", index_name: "中证500"}
+    - {symbol: "159915", name: "创业板ETF",market_type: "A股", settlement: "T+1", index_name: "创业板指"}
+    - {symbol: "588000", name: "科创50ETF",market_type: "A股", settlement: "T+1", index_name: "科创50"}
+    - {symbol: "512100", name: "中证1000ETF",market_type: "A股", settlement: "T+1", index_name: "中证1000"}
 
   # 行业主题 ETF (T+1)
   sector:
-    - {symbol: "159995", name: "芯片ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "512480", name: "半导体ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "512010", name: "医药ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "159928", name: "消费ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "512880", name: "证券ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "516160", name: "新能源ETF", market_type: "A股", settlement: "T+1"}
-    - {symbol: "512690", name: "酒ETF", market_type: "A股", settlement: "T+1"}
+    - {symbol: "159995", name: "芯片ETF", market_type: "A股", settlement: "T+1", index_name: "国证芯片"}
+    - {symbol: "512480", name: "半导体ETF", market_type: "A股", settlement: "T+1", index_name: "中证全指半导体"}
+    - {symbol: "512010", name: "医药ETF", market_type: "A股", settlement: "T+1", index_name: "中证医药"}
+    - {symbol: "159928", name: "消费ETF", market_type: "A股", settlement: "T+1", index_name: "中证主要消费"}
+    - {symbol: "512880", name: "证券ETF", market_type: "A股", settlement: "T+1", index_name: "中证全指证券"}
+    - {symbol: "516160", name: "新能源ETF", market_type: "A股", settlement: "T+1", index_name: "中证新能源"}
+    - {symbol: "512690", name: "酒ETF", market_type: "A股", settlement: "T+1", index_name: "中证酒"}
 
   # 跨境 / 商品 ETF (T+0)
   cross_border_commodity:
-    - {symbol: "513100", name: "纳指ETF",          market_type: "跨境", settlement: "T+0"}
-    - {symbol: "159920", name: "恒生ETF",          market_type: "跨境", settlement: "T+0"}
-    - {symbol: "513500", name: "标普500ETF",       market_type: "跨境", settlement: "T+0"}
-    - {symbol: "159941", name: "纳指ETF(广发)",     market_type: "跨境", settlement: "T+0"}
-    - {symbol: "518880", name: "黄金ETF",          market_type: "商品", settlement: "T+0"}
-    - {symbol: "513050", name: "中概互联ETF",       market_type: "跨境", settlement: "T+0"}
+    - {symbol: "513100", name: "纳指ETF",          market_type: "跨境", settlement: "T+0", index_name: "纳斯达克100"}
+    - {symbol: "159920", name: "恒生ETF",          market_type: "跨境", settlement: "T+0", index_name: "恒生指数"}
+    - {symbol: "513500", name: "标普500ETF",       market_type: "跨境", settlement: "T+0", index_name: "标普500"}
+    - {symbol: "159941", name: "纳指ETF(广发)",     market_type: "跨境", settlement: "T+0", index_name: "纳斯达克100"}
+    - {symbol: "518880", name: "黄金ETF",          market_type: "商品", settlement: "T+0", index_name: "黄金现货AU9999"}
+    - {symbol: "513050", name: "中概互联ETF",       market_type: "跨境", settlement: "T+0", index_name: "中国互联网50"}
 
 # --- 交易成本 (实盘与回测必须一致) ---
 # 口径确认 (2026-09-11, 用户拍板): 佣金 round-trip 0.15% = 单边 0.075%
@@ -110,6 +110,7 @@ universe_filter:
   min_list_days: 60             # 上市 ≥ 60 个交易日
   max_premium_pct: 3.0          # 溢价率 ≤ 3%
   liquidity_concentration_warn: 0.005  # 持仓/日均成交额 > 0.5% → 警告
+  premium_check_required_market_types: ["跨境"]  # 溢价检查为必需的产品类别 (unknown → 禁新买, spec §4.4)
 
 # --- 组合优化 (第四层漏斗) ---
 portfolio:

@@ -103,6 +103,9 @@ def make_settings(**notification_overrides) -> dict:
 def make_result(signals: list[Signal]) -> PipelineResult:
     return PipelineResult(
         run_date="2026-09-11",
+        mode="research",
+        strategy_version="v0.2",
+        macro_scope="a_share",
         macro_score=MacroScore(
             trend_score=27.0, breadth_score=0.0,
             composite_score=15.0, position_cap=0.0, regime="ranging",
@@ -194,6 +197,18 @@ class TestBuildMessage:
         result = make_result([unknown])
         _, content = notifier.build_message(result, make_settings())
         assert "999999" in content  # 无名称映射时回退为代码本身
+
+    def test_header_has_mode_version_and_data_cutoff(self):
+        """A0-1/A0-2: 推送含模式/策略版本/数据截止/无真实账户声明."""
+        result = make_result([buy_signal()])
+        title, content = notifier.build_message(result, make_settings())
+
+        assert "研究模式" in title
+        assert "research" in content
+        assert "策略版本 v0.2" in content
+        assert "数据截止 2026-09-11" in content
+        assert "无真实账户接入" in content
+        assert "非成交/持仓记录" in content
 
 
 # ------------------------------------------------------------------
