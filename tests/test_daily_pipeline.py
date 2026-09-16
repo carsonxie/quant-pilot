@@ -10,13 +10,14 @@
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 import pytest
 import yaml
 
+from data_pipeline.accounting import AccountEvent, AccountService
 from data_pipeline.duckdb_manager import DuckDBManager
 from data_pipeline.processors.validator import DataQualityError
 from orchestration.daily_pipeline import (
@@ -666,5 +667,192 @@ class TestTargetRecord:
             total = sum(weights["target_weight"].to_list())
             assert total == pytest.approx(1.0, abs=1e-6)  # 含现金权重
             assert "__CASH__" in weights["symbol"].to_list()
+        finally:
+            db.close()
+
+
+# ------------------------------------------------------------------
+# 调仓规划接入 (M4: 账户存在 → 建议; 无账户 → research 不变)
+# ------------------------------------------------------------------
+
+class TestRebalanceIntegration:
+    """daily Step 10: 账户 + 状态化止损 + 建议落库 (spec §5.4/§5.5/§6.1)."""
+
+    @staticmethod
+    def _seed_account(db_path: str) -> None:
+        """建账户并导入初始持仓 (批次已解锁, 可与目标产生偏离)."""
+        db = DuckDBManager(db_path)
+        db.init_database()
+        try:
+            svc = AccountService(db)
+            svc.ensure_account("ACC-1", "测试账户", mode="paper")
+            svc.import_events([AccountEvent(
+                event_id="init-1", account_id="ACC-1", event_type="initial",
+                event_time=datetime(2026, 5, 1, 10, 0), amount=90000.0,
+                payload={"positions": [
+                    {"symbol": "510300", "shares": 1000, "cost_basis": 1060.0,
+                     "open_date": "2026-05-01", "sellable_date": "2026-05-02"},
+                    {"symbol": "510050", "shares": 1000, "cost_basis": 1590.0,
+                     "open_date": "2026-05-01", "sellable_date": "2026-05-02"},
+                ]},
+            )])
+        finally:
+            db.close()
+
+    def test_account_generates_proposals_and_state(self, settings, db_path, full_df):
+        self._seed_account(db_path)
+        settings["rebalancing"] = {
+            "account": "ACC-1", "band_points": 0.05, "min_trade_amount": 0.0,
+            "valid_days": 3, "cooldown_days": 5, "lot_size": 100,
+        }
+        # 简化: A 股不要求 NAV 溢价检查 (合成数据无 NAV; 真实配置默认仅跨境必需)
+        settings["universe_filter"]["premium_check_required_market_types"] = []
+
+        result = run_daily_pipeline(
+            settings, db_path, fetcher=FakeFetcher(full_df),
+        )
+
+        # 调仓已运行并落库
+        assert result.rebalance is not None
+        assert result.rebalance.account_id == "ACC-1"
+        assert result.rebalance.plan.paused is False
+
+        db = DuckDBManager(db_path)
+        try:
+            proposals = db.get_open_proposals("ACC-1")
+            assert len(proposals) > 0
+            assert set(proposals["status"].to_list()) <= {"proposed", "partially_filled"}
+            # 建议引用目标与账户状态 (四类记录不混同)
+            assert set(proposals["target_id"].to_list()) == {result.target_id}
+            # 建议有效性: 有效期在决策日之后
+            valid = proposals["valid_until"].to_list()
+            assert all(v is not None and str(v) > result.run_date for v in valid)
+            # 账户持仓状态已写入 (M4-06)
+            states = db.get_strategy_states()
+            assert set(states["symbol"].to_list()) == {"510300", "510050"}
+            assert all(states["stop_price"].to_list())
+            # 运行记录含调仓留痕
+            run = db.get_run(result.run_id)
+            assert "rebalance" in run["detail_json"]
+        finally:
+            db.close()
+
+    def test_rerun_same_day_deduplicates_proposals(self, settings, db_path, full_df):
+        """同决策日重跑: 目标 ID 稳定 → 建议确定性去重, 不重复累计 (spec §3.2/§6.5)."""
+        self._seed_account(db_path)
+        settings["rebalancing"] = {
+            "account": "ACC-1", "band_points": 0.05, "min_trade_amount": 0.0,
+        }
+        settings["universe_filter"]["premium_check_required_market_types"] = []
+        fetcher = FakeFetcher(full_df)
+
+        first = run_daily_pipeline(settings, db_path, fetcher=fetcher)
+        second = run_daily_pipeline(settings, db_path, fetcher=fetcher)
+
+        # 同日运行 → 同一目标与账户事实 → 同一建议 (引用一致)
+        assert first.target_id == second.target_id
+        assert second.rebalance is not None
+        assert second.rebalance.proposals_inserted == 0  # 全部去重跳过
+        assert second.rebalance.proposals_skipped > 0
+
+        db = DuckDBManager(db_path)
+        try:
+            total = db.get_table_count("trade_proposals")
+            open_props = db.get_open_proposals("ACC-1")
+            # 不产生重复建议行
+            assert total == len(open_props)
+            assert set(open_props["target_id"].to_list()) == {second.target_id}
+        finally:
+            db.close()
+
+    def test_new_decision_replaces_previous_open_proposals(self, settings, db_path, full_df):
+        """新决策日: 旧开放建议 → replaced (保留事实, 不累计为待买; spec §3.2)."""
+        from orchestration.proposal_ledger import (
+            Proposal,
+            ProposalLedger,
+            make_proposal_id,
+        )
+
+        self._seed_account(db_path)
+        settings["rebalancing"] = {
+            "account": "ACC-1", "band_points": 0.05, "min_trade_amount": 0.0,
+        }
+        settings["universe_filter"]["premium_check_required_market_types"] = []
+
+        # 手工模拟"昨日"目标下的开放建议
+        db = DuckDBManager(db_path)
+        try:
+            db.init_database()
+            ledger = ProposalLedger(db)
+            yesterday = datetime(2026, 9, 10, 9, 0)
+            old = Proposal(
+                proposal_id=make_proposal_id("target-20260910", "510300", "SELL"),
+                target_id="target-20260910", account_id="ACC-1",
+                account_as_of=yesterday, symbol="510300", side="SELL",
+                shares=100.0, ref_price=1.0, ref_time=yesterday,
+                est_amount=100.0, est_fee=5.0, target_weight=0.0,
+                actual_weight=0.1, valid_until=datetime(2026, 9, 13),
+                priority=50, status="proposed", reason="昨日计划",
+            )
+            ledger.create_proposals([old])
+        finally:
+            db.close()
+
+        run_daily_pipeline(settings, db_path, fetcher=FakeFetcher(full_df))
+
+        db = DuckDBManager(db_path)
+        try:
+            old_row = db.get_proposal(old.proposal_id)
+            assert old_row is not None and old_row["status"] == "replaced"
+            # 新目标的建议开放
+            open_props = db.get_open_proposals("ACC-1")
+            assert "target-20260910" not in set(open_props["target_id"].to_list())
+        finally:
+            db.close()
+
+    def test_no_account_keeps_research_output(self, settings, db_path, full_df):
+        """未配置账户: 不产生任何建议/状态写入 (研究模式不受影响)."""
+        result = run_daily_pipeline(
+            settings, db_path, fetcher=FakeFetcher(full_df),
+        )
+        assert result.rebalance is None
+        assert result.signals  # 研究输出保持
+
+        db = DuckDBManager(db_path)
+        try:
+            assert db.get_table_count("trade_proposals") == 0
+            assert db.get_table_count("strategy_states") == 0
+        finally:
+            db.close()
+
+    def test_paused_account_no_proposals(self, settings, db_path, full_df):
+        """持仓缺估值价 → 暂停可执行数量 (spec §3.3), 不生成建议."""
+        db = DuckDBManager(db_path)
+        db.init_database()
+        try:
+            svc = AccountService(db)
+            svc.ensure_account("ACC-1", "测试账户", mode="paper")
+            svc.import_events([AccountEvent(
+                event_id="init-1", account_id="ACC-1", event_type="initial",
+                event_time=datetime(2026, 5, 1, 10, 0), amount=5000.0,
+                payload={"positions": [
+                    {"symbol": "999999", "shares": 100, "cost_basis": 1000.0,
+                     "open_date": "2026-05-01", "sellable_date": "2026-05-02"},
+                ]},
+            )])
+        finally:
+            db.close()
+
+        settings["rebalancing"] = {"account": "ACC-1"}
+        settings["universe_filter"]["premium_check_required_market_types"] = []
+        result = run_daily_pipeline(
+            settings, db_path, fetcher=FakeFetcher(full_df),
+        )
+
+        assert result.rebalance is not None
+        assert result.rebalance.plan.paused is True
+        db = DuckDBManager(db_path)
+        try:
+            assert db.get_table_count("trade_proposals") == 0
         finally:
             db.close()

@@ -281,49 +281,44 @@ class RiskManager:
     # ATR 计算 (Wilder 平滑法)
     # ------------------------------------------------------------------
 
-    def _calc_atr(self, sym_df: pl.DataFrame) -> Optional[float]:
-        """计算 Average True Range (Wilder 平滑).
+    def calc_atr_series(self, sym_df: pl.DataFrame) -> list[float] | None:
+        """计算完整 ATR 序列 (Wilder 平滑), 与 _calc_atr 同一算法.
 
-        True Range = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close)
-        )
-
-        初始 ATR = mean(TR over first N periods)
-        后续 ATR_t = (ATR_{t-1} * (N-1) + TR_t) / N
+        Returns:
+            与 sym_df 行对齐的 ATR 序列 (前 n 行无值填 nan), 或 None (数据不足).
+            供持有期状态化止损使用 (M4-06: 每日状态更新取序列尾部).
         """
         n = self.atr_period
-
         high = sym_df["high"].to_numpy()
         low = sym_df["low"].to_numpy()
         close = sym_df["close"].to_numpy()
-
         if len(high) < n + 1:
             return None
 
-        # True Range
         prev_close = np.roll(close, 1)
-        prev_close[0] = close[0]  # 第一个 TR 用 high-low
-
+        prev_close[0] = close[0]
         tr = np.maximum(
             high - low,
-            np.maximum(
-                np.abs(high - prev_close),
-                np.abs(low - prev_close),
-            ),
+            np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)),
         )
-
-        # 初始 ATR: 简单平均前 N 个 TR
-        atr_val = float(np.mean(tr[1:n + 1]))  # tr[0] 用了 close[0] 作 prev_close, 跳过
-
-        # Wilder 平滑: TR 从第 n+1 个开始 (索引 n+1)
-        atr_series = [atr_val]
+        atr_val = float(np.mean(tr[1:n + 1]))
+        series = [float("nan")] * (n + 1)
+        series[n] = atr_val
         for i in range(n + 1, len(tr)):
             atr_val = (atr_val * (n - 1) + tr[i]) / n
-            atr_series.append(atr_val)
+            series.append(atr_val)
+        return series
 
-        return float(atr_series[-1])
+    # ------------------------------------------------------------------
+    # ATR 计算 (Wilder 平滑法)
+    # ------------------------------------------------------------------
+
+    def _calc_atr(self, sym_df: pl.DataFrame) -> Optional[float]:
+        """计算 Average True Range (Wilder 平滑, 取序列末值)."""
+        series = self.calc_atr_series(sym_df)
+        if series is None:
+            return None
+        return float(series[-1])
 
     # ------------------------------------------------------------------
     # 纯函数工具: 止损线上移约束 (供 pipeline 层调用)

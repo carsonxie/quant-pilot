@@ -182,6 +182,17 @@ class ProposalLedger:
         with self.db.transaction():
             return self.db.mark_targets_replaced(new_target_id)
 
+    def mark_stale_replaced(self, current_target_id: str | None) -> int:
+        """新计划生成后: 非当前目标的开放建议 → replaced (spec §3.2).
+
+        与 mark_target_replaced 的区别: 替代**所有**更早的开放建议 (即使引用
+        另一个旧目标), 因为本轮计划已完整重算; 当前目标的新建议保留.
+
+        Returns: 被替代的建议数.
+        """
+        with self.db.transaction():
+            return self.db.mark_open_replaced_except(current_target_id)
+
     def expire_open_proposals(self, now: datetime) -> int:
         """超过 valid_until 的开放建议 → expired."""
         df = self.db.get_open_proposals()

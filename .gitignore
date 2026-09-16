@@ -27,6 +27,7 @@ desktop.ini
 data/quant_pilot.duckdb
 data/*.duckdb
 data/backups/
+data/backtests/
 data/cleaned/
 data/factors/
 

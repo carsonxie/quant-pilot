@@ -67,6 +67,7 @@ init-db = "data_pipeline.duckdb_manager:main"
 daily = "orchestration.daily_pipeline:main"
 backtest = "backtest.custom_loop:main"
 account-import = "data_pipeline.accounting:main"
+baseline = "backtest.baseline_runner:main"
 factor-check = "scripts.validate_registry:main"
 
 [tool.ruff]

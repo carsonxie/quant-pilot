@@ -250,7 +250,7 @@ class TestSchemaMigration:
             "SELECT version FROM schema_version ORDER BY version"
         ).fetchall()
         db.close()
-        assert [v[0] for v in versions] == [1, 2, 3, 4]
+        assert [v[0] for v in versions] == [1, 2, 3, 4, 5]
 
     def test_upsert_without_version_keeps_existing(self, db):
         """旧调用方不传版本列时, 更新不覆盖已记录的版本 (COALESCE 保护)."""
@@ -283,7 +283,7 @@ class TestV3TablesAndRuns:
         ):
             assert db.table_exists(table), f"缺少表: {table}"
 
-    def test_chained_migration_v1_to_v3(self, tmp_path):
+    def test_chained_migration_v1_to_current(self, tmp_path):
         db_path = TestSchemaMigration()._make_v1_db(tmp_path)
         db = DuckDBManager(db_path)
         db.init_database()
@@ -291,14 +291,16 @@ class TestV3TablesAndRuns:
             row[0] for row in
             db.conn.execute("SELECT version FROM schema_version ORDER BY 1").fetchall()
         ]
-        assert versions == [1, 2, 3, 4]
+        assert versions == [1, 2, 3, 4, 5]
         assert db.table_exists("account_events")
         assert db.table_exists("instruments")
+        assert db.table_exists("strategy_states")
         logs = db.conn.execute(
             "SELECT version, status FROM schema_migration_log ORDER BY version"
         ).fetchall()
         assert (3, "applied") in logs
         assert (4, "applied") in logs
+        assert (5, "applied") in logs
         # 迁移不丢失 v1 事实
         assert db.get_table_count("trade_signals") == 1
         db.close()

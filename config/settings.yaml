@@ -130,6 +130,39 @@ risk_management:
   min_hold_days: 3              # 最低持仓天数
   turnover_threshold: 0.15      # 仓位差异 < 15% 不调仓
 
+# --- 基准研究配置 (M5; B0/B1 共用同一初始映射与权重) ---
+# ⚠️ 研究示例: 来源 docs/讨论2.md 的"股70% / 黄金10% / 现金20%"示例框架, 池内按
+#    等权映射到 6 只股票类 ETF + 518880 (黄金)。**不是**用户的真实 SAA, 也不是最优
+#    配置; 实际比例由用户后续指定并形成新版本 (spec §5.1/§10.2 示例不自动升级)。
+baselines:
+  label: "research_example_discussion2_70_10_20"
+  initial_cash: 100000.0        # 与 backtest.initial_cash 一致 (同口径比较)
+  band_points: 0.05             # B1 阈值: 5 个百分点 (示例)
+  check_weekday: 4              # 保留: 首版检查日固定为"每周最后交易日" (spec §5.4)
+  lot_size: 100
+  b0_cash_policy: "hold_cash"   # B0 新增资金政策: 留现金, 不买入 (显式声明, spec §5.1)
+  weights:                      # 股 70% / 黄金 10% / 现金 20% (示例; 合计=1)
+    "510300": 0.15              # 沪深300
+    "510500": 0.15              # 中证500
+    "159915": 0.10              # 创业板
+    "513100": 0.10              # 纳斯达克100
+    "159920": 0.10              # 恒生
+    "512100": 0.10              # 中证1000 (股票合计 70%)
+    "518880": 0.10              # 黄金 (商品)
+    "__CASH__": 0.20            # 现金 20%
+
+# --- 调仓规划 (M4; 目标 → 账户实际 → 建议) ---
+# band_points 为绝对百分点偏离触发带 (spec §5.4): 0.05 = 5 个百分点, 示例值;
+# 收益/风险参数修改前须向用户确认 (AGENTS §1.5)。空账户时本段不产生任何建议。
+rebalancing:
+  account: null                 # 已录入账户 ID (account-import 创建; null = 不生成建议)
+  band_points: 0.05             # 常规调整触发带 (|actual − target| ≥ band); 示例
+  min_trade_amount: 500.0       # 常规调整最小金额 (元); 只约束常规调整, 不压制风险退出
+  valid_days: 3                 # 建议有效期 (自然日近似; 到期 → expired)
+  cooldown_days: 5              # 止损退出后重新进入冷却 (自然日近似, spec §5.5)
+  lot_size: 100                 # 最小交易单位 (份/手, 与回测一致)
+  cash_reserve: 0.0             # 现金预留 (元); 只影响可用量, 不减少净资产 (账户层预留优先)
+
 # --- 消息推送 ---
 notification:
   channel: "pushplus"           # pushplus / feishu / email

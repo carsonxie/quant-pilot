@@ -12,6 +12,8 @@
   8. 信号生成  — 与昨日目标权重对比定 BUY/SELL/HOLD; 防抖仅约束常规调整,
                  明确退出(清零)/止损/骤降减仓不受防抖压制 (spec §5.4/§5.5, C04)
   9. 信号落库  — 确定性 signal_id, 重复运行幂等
+ 10. 调仓规划  — 账户存在时: 状态化止损 + 目标 vs 实际 → 建议落库 (M4);
+                 账户不存在 → 保持研究输出, 不做任何写入
 
 Usage:
     uv run daily   # 主流程完成后自动推送信号 (token 未配置时安全跳过)
@@ -28,7 +30,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import polars as pl
 
@@ -41,6 +43,9 @@ from data_pipeline.processors.validator import (
 )
 from strategies import etf_pool, portfolio_optimizer, risk_manager
 from strategies.macro_timing import MacroScore, MacroTiming
+
+if TYPE_CHECKING:  # 避免与 rebalance_run 的运行时导入形成环
+    from orchestration.rebalance_run import RebalanceRun
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,7 @@ class PipelineResult:
     portfolio: Optional[portfolio_optimizer.PortfolioResult] = None
     risk_report: Optional[risk_manager.RiskReport] = None
     signals: list[Signal] = field(default_factory=list)
+    rebalance: RebalanceRun | None = None  # 调仓规划结果 (M4; 无账户=None)
     step_timings: dict[str, float] = field(default_factory=dict)
 
     def summary(self) -> str:
@@ -125,6 +131,29 @@ class PipelineResult:
                 f"  {sig.symbol} {sig.direction} "
                 f"{sig.prev_weight:.1%} → {sig.target_weight:.1%} | {sig.trigger_reason}"
             )
+
+        if self.rebalance is not None:
+            lines.append(
+                f"[调仓建议] 账户 {self.rebalance.account_id} | "
+                f"新增 {self.rebalance.proposals_inserted} 条, "
+                f"跳过 {self.rebalance.proposals_skipped} 项, "
+                f"替代旧建议 {self.rebalance.replaced_open} 条"
+            )
+            if self.rebalance.stop_exits:
+                lines.append(
+                    f"  ⚠️ 状态化止损触发: {', '.join(self.rebalance.stop_exits)} "
+                    f"(风险退出优先, 不受带宽压制)"
+                )
+            for prop in self.rebalance.plan.proposals:
+                dep = f" [依赖 {prop.depends_on}]" if prop.depends_on else ""
+                lines.append(
+                    f"  {prop.side} {prop.symbol} {prop.shares:,} 份 "
+                    f"≈ {prop.est_amount:,.0f} 元 (费 {prop.est_fee:,.0f}){dep} | {prop.reason}"
+                )
+            if self.rebalance.plan.paused:
+                lines.append("  ⚠️ 账户关键约束未满足: 已暂停生成可执行数量")
+        else:
+            lines.append("[调仓建议] 未配置账户 (research 模式保持研究输出)")
 
         total = sum(self.step_timings.values())
         lines.append(f"[耗时] 全流程 {total:.1f}s " + self._timing_str())
@@ -183,7 +212,8 @@ def run_daily_pipeline(
 
         run_date = str(ohlcv["date"].max())
         run_id = f"daily-{run_date.replace('-', '')}-{started_at:%H%M%S}"
-        target_id = f"target-{run_date.replace('-', '')}-{started_at:%H%M%S}"
+        # 目标 ID 按决策日确定 (同日重跑 → 同一目标 → 建议确定性去重, 幂等)
+        target_id = f"target-{run_date.replace('-', '')}"
         macro = MacroTiming(
             ma_short=settings["macro_timing"].get("ma_short", 20),
             ma_long=settings["macro_timing"].get("ma_long", 60),
@@ -263,6 +293,19 @@ def run_daily_pipeline(
         )
         timings["signal_persist"] = time.perf_counter() - t0
 
+        # ---- Step 10: 调仓规划 (M4; 账户存在时生成建议) ----
+        t0 = time.perf_counter()
+        target_weights = {
+            w.symbol: round(w.final_weight, 6) for w in portfolio.weights
+        }
+        target_weights["__CASH__"] = round(1.0 - sum(target_weights.values()), 6)
+        rebalance = _step_rebalance(
+            db, settings, ohlcv, target_weights,
+            as_of=date.fromisoformat(run_date), target_id=target_id,
+            pool_report=pool_report,
+        )
+        timings["rebalance"] = time.perf_counter() - t0
+
         result = PipelineResult(
             run_date=run_date,
             run_id=run_id,
@@ -278,6 +321,7 @@ def run_daily_pipeline(
             portfolio=portfolio,
             risk_report=risk_report,
             signals=signals,
+            rebalance=rebalance,
             step_timings=timings,
         )
         _step_write_run(db, result, started_at, universe_size=len(symbols))
@@ -287,6 +331,51 @@ def run_daily_pipeline(
 
     finally:
         db.close()
+
+
+# ------------------------------------------------------------------
+# Step 10: 调仓规划 (M4; 账户存在时)
+# ------------------------------------------------------------------
+
+def _step_rebalance(
+    db: DuckDBManager,
+    settings: dict,
+    ohlcv: pl.DataFrame,
+    target_weights: dict[str, float],
+    *,
+    as_of: date,
+    target_id: str,
+    pool_report: etf_pool.PoolReport | None,
+) -> RebalanceRun | None:
+    """目标 vs 账户实际 → 调仓建议 (账户不存在时返回 None, 不写入).
+
+    失败不阻断 daily: 数据/账户问题记录告警, 由 runs.detail_json 留痕.
+    """
+    try:
+        from orchestration.rebalance_run import run_rebalance
+    except ImportError:  # pragma: no cover - 理论不可达 (模块存在)
+        logger.exception("调仓模块导入失败")
+        return None
+
+    try:
+        rebalance = run_rebalance(
+            db, settings, ohlcv, target_weights,
+            as_of=as_of, target_id=target_id,
+            pool_can_buy=set(pool_report.buyable) if pool_report else None,
+            pool_can_sell=set(pool_report.sellable) if pool_report else None,
+            stale_symbols=pool_report.stale_symbols if pool_report else None,
+            ref_time=datetime.combine(as_of, datetime.min.time()) + timedelta(hours=15, minutes=30),
+        )
+    except Exception:
+        logger.exception("调仓规划失败 (信号/目标已落库, 不影响流程成败)")
+        return None
+    if rebalance is not None:
+        logger.info(
+            "调仓建议: %d 条新增, %d 条跳过, %d 条旧建议已替代 (账户 %s)",
+            rebalance.proposals_inserted, rebalance.proposals_skipped,
+            rebalance.replaced_open, rebalance.account_id,
+        )
+    return rebalance
 
 
 # ------------------------------------------------------------------
@@ -771,6 +860,18 @@ def _step_write_run(
             {"symbol": w.symbol, "weight": round(w.final_weight, 6)}
             for w in (result.portfolio.weights if result.portfolio else [])
         ],
+        "rebalance": (
+            {
+                "account_id": result.rebalance.account_id,
+                "proposals": result.rebalance.proposals_inserted,
+                "skipped": result.rebalance.proposals_skipped,
+                "replaced": result.rebalance.replaced_open,
+                "stop_exits": result.rebalance.stop_exits,
+                "paused": result.rebalance.plan.paused,
+            }
+            if result.rebalance
+            else None
+        ),
     }
     db.insert_run(pl.DataFrame([{
         "run_id": result.run_id,

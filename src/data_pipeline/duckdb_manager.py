@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 # ---- Schema 版本 ----
 # v1: P0 MVP 6 表; v2: trade_signals.strategy_version (旧记录标注 v0.1, A0-1);
 # v3: 账户/事件/批次/快照 + 四类记录 + 运行/实验/迁移日志 (M2);
-# v4: instruments/universe_versions/universe_members/nav_daily (M3 四层池)
-SCHEMA_VERSION = 4
+# v4: instruments/universe_versions/universe_members/nav_daily (M3 四层池);
+# v5: strategy_states (持有期高水位/棘轮止损/冷却状态, M4-06)
+SCHEMA_VERSION = 5
 
 # ---- DDL (建表语句) ----
 _DDL_OHLCV = """
@@ -344,6 +345,23 @@ CREATE TABLE IF NOT EXISTS nav_daily (
 )
 """
 
+_DDL_STRATEGY_STATES = """
+CREATE TABLE IF NOT EXISTS strategy_states (
+    symbol         VARCHAR PRIMARY KEY,
+    has_position   BOOLEAN DEFAULT FALSE,
+    entry_date     DATE,                    -- 当前持有期起点 (批次最早 open_date)
+    high_water     DOUBLE,                  -- 持有期最高收盘价 (只在持有期维护)
+    atr            DOUBLE,                  -- 最新 ATR (Wilder, T 日收盘)
+    stop_price     DOUBLE,                  -- 有效止损线 (棘轮, 只上移)
+    stop_triggered BOOLEAN DEFAULT FALSE,   -- 本轮触发
+    pending_exit   BOOLEAN DEFAULT FALSE,   -- 退出指令未完成 (持续展示风险)
+    exit_reason    VARCHAR,
+    exit_date      DATE,
+    cooldown_until DATE,                    -- 重新进入冷却到期 (自然日近似)
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 _ALL_DDL: list[tuple[str, str]] = [
     ("ohlcv_daily", _DDL_OHLCV),
     ("etf_metadata", _DDL_ETF_META),
@@ -366,6 +384,7 @@ _ALL_DDL: list[tuple[str, str]] = [
     ("universe_versions", _DDL_UNIVERSE_VERSIONS),
     ("universe_members", _DDL_UNIVERSE_MEMBERS),
     ("nav_daily", _DDL_NAV_DAILY),
+    ("strategy_states", _DDL_STRATEGY_STATES),
 ]
 
 
@@ -520,6 +539,28 @@ class DuckDBManager:
                 ],
             )
             logger.info("Schema migrated to v4 (%s)", checks_v4)
+
+        if current < 5:
+            # v5: 持有期状态表 (只增表; M4-06 状态化止损与冷却)
+            checks_v5 = {
+                t: self.get_table_count(t)
+                for t in ("ohlcv_daily", "trade_signals", "account_events")
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                [5, "v5: strategy_states (持有期高水位/棘轮止损/冷却)"],
+            )
+            self.conn.execute(
+                "INSERT INTO schema_migration_log "
+                "(version, description, checks_json, status) VALUES (?, ?, ?, ?)",
+                [
+                    5,
+                    "v5: strategy_states (M4-06 状态化 ATR 止损与重新进入冷却)",
+                    json.dumps(checks_v5, ensure_ascii=False),
+                    "applied",
+                ],
+            )
+            logger.info("Schema migrated to v5 (%s)", checks_v5)
 
     # ------------------------------------------------------------------
     # OHLCV 写入 (UPSERT — 幂等)
@@ -942,6 +983,19 @@ class DuckDBManager:
         columns = [desc[0] for desc in self.conn.description]
         return pl.DataFrame(result, schema=columns, orient="row")
 
+    def get_position_entry_dates(self, account_id: str) -> dict[str, date]:
+        """账户各标的持有期起点 = 未平批次最早 open_date (M4-06 高水位用)."""
+        result = self.conn.execute(
+            "SELECT symbol, MIN(open_date) AS entry_date FROM position_lots "
+            "WHERE account_id = ? GROUP BY symbol ORDER BY symbol",
+            [account_id],
+        ).fetchall()
+        return {
+            str(symbol): entry_date
+            for symbol, entry_date in result
+            if entry_date is not None
+        }
+
     def upsert_account_snapshot(self, df: pl.DataFrame) -> int:
         """写入账户快照 (account_id + as_of 主键)."""
         if df.is_empty():
@@ -1058,9 +1112,65 @@ class DuckDBManager:
         )
 
     def get_run(self, run_id: str) -> dict | None:
-        """按 run_id 读取运行记录."""
         row = self.conn.execute(
             "SELECT * FROM runs WHERE run_id = ?", [run_id],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in self.conn.description]
+        return dict(zip(columns, row, strict=True))
+
+    # ------------------------------------------------------------------
+    # 实验记录 (v3 / M5: 规则实验追踪)
+    # ------------------------------------------------------------------
+
+    def upsert_experiment(self, df: pl.DataFrame) -> int:
+        """写入实验记录 (experiment_id 主键; 失败试验同样保留, spec §7.1)."""
+        if df.is_empty():
+            return 0
+        required = {"experiment_id", "kind", "status"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"experiments DataFrame missing required columns: {missing}")
+        payload = df
+        for col, dtype in (
+            ("code_version", pl.Utf8), ("data_version", pl.Utf8),
+            ("pool_version", pl.Utf8), ("config_json", pl.Utf8),
+            ("cost_scenario", pl.Utf8), ("purpose", pl.Utf8),
+            ("result_location", pl.Utf8), ("conclusion", pl.Utf8),
+        ):
+            if col not in payload.columns:
+                payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
+        pdf = payload.to_pandas()
+        self.conn.register("_experiments", pdf)
+        try:
+            self.conn.execute("""
+                INSERT INTO experiments
+                    (experiment_id, kind, code_version, data_version,
+                     pool_version, config_json, cost_scenario, purpose,
+                     result_location, status, conclusion)
+                SELECT experiment_id, kind, code_version, data_version,
+                       pool_version, config_json, cost_scenario, purpose,
+                       result_location, status, conclusion
+                FROM _experiments
+                ON CONFLICT (experiment_id) DO UPDATE SET
+                    code_version    = EXCLUDED.code_version,
+                    data_version    = EXCLUDED.data_version,
+                    pool_version    = EXCLUDED.pool_version,
+                    config_json     = EXCLUDED.config_json,
+                    cost_scenario   = EXCLUDED.cost_scenario,
+                    purpose         = EXCLUDED.purpose,
+                    result_location = EXCLUDED.result_location,
+                    status          = EXCLUDED.status,
+                    conclusion      = EXCLUDED.conclusion
+            """)
+        finally:
+            self.conn.unregister("_experiments")
+        return len(df)
+
+    def get_experiment(self, experiment_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id = ?", [experiment_id],
         ).fetchone()
         if row is None:
             return None
@@ -1300,6 +1410,26 @@ class DuckDBManager:
             )
         return count
 
+    def mark_open_replaced_except(self, current_target_id: str | None) -> int:
+        """新计划生成后, 非当前目标 (或全部) 的开放建议标记 replaced.
+
+        current_target_id=None 时替代全部开放建议 (新计划已完整重算).
+        Returns: 被替换的建议数.
+        """
+        if current_target_id is None:
+            count_row = self.conn.execute(
+                "SELECT COUNT(*) FROM trade_proposals "
+                "WHERE status IN ('proposed', 'partially_filled')"
+            ).fetchone()
+            count = int(count_row[0]) if count_row else 0
+            if count:
+                self.conn.execute(
+                    "UPDATE trade_proposals SET status = 'replaced' "
+                    "WHERE status IN ('proposed', 'partially_filled')"
+                )
+            return count
+        return self.mark_targets_replaced(current_target_id)
+
     # ------------------------------------------------------------------
     # 产品契约 / 池版本 / NAV (v4 / M3)
     # ------------------------------------------------------------------
@@ -1530,6 +1660,80 @@ class DuckDBManager:
         else:
             result = self.conn.execute(
                 "SELECT * FROM nav_daily ORDER BY symbol, date"
+            ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    # ------------------------------------------------------------------
+    # 策略状态 (持有期高水位/棘轮止损/冷却; M4-06)
+    # ------------------------------------------------------------------
+
+    def upsert_strategy_states(self, df: pl.DataFrame) -> int:
+        """写入策略状态 (symbol 主键 UPSERT, 幂等)."""
+        if df.is_empty():
+            return 0
+        required = {"symbol"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"strategy_states DataFrame missing columns: {missing}")
+        payload = df
+        for col, dtype in (
+            ("has_position", pl.Boolean), ("entry_date", pl.Date),
+            ("high_water", pl.Float64), ("atr", pl.Float64),
+            ("stop_price", pl.Float64), ("stop_triggered", pl.Boolean),
+            ("pending_exit", pl.Boolean), ("exit_reason", pl.Utf8),
+            ("exit_date", pl.Date), ("cooldown_until", pl.Date),
+        ):
+            if col not in payload.columns:
+                payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
+        pdf = payload.to_pandas()
+        self.conn.register("_strategy_states", pdf)
+        try:
+            self.conn.execute("""
+                INSERT INTO strategy_states
+                    (symbol, has_position, entry_date, high_water, atr,
+                     stop_price, stop_triggered, pending_exit, exit_reason,
+                     exit_date, cooldown_until)
+                SELECT symbol,
+                       COALESCE(has_position, FALSE),
+                       entry_date, high_water, atr, stop_price,
+                       COALESCE(stop_triggered, FALSE),
+                       COALESCE(pending_exit, FALSE),
+                       exit_reason, exit_date, cooldown_until
+                FROM _strategy_states
+                ON CONFLICT (symbol) DO UPDATE SET
+                    has_position   = EXCLUDED.has_position,
+                    entry_date     = EXCLUDED.entry_date,
+                    high_water     = EXCLUDED.high_water,
+                    atr            = EXCLUDED.atr,
+                    stop_price     = EXCLUDED.stop_price,
+                    stop_triggered = EXCLUDED.stop_triggered,
+                    pending_exit   = EXCLUDED.pending_exit,
+                    exit_reason    = EXCLUDED.exit_reason,
+                    exit_date      = EXCLUDED.exit_date,
+                    cooldown_until = EXCLUDED.cooldown_until,
+                    updated_at     = now()
+            """)
+        finally:
+            self.conn.unregister("_strategy_states")
+        return len(df)
+
+    def get_strategy_states(self, symbols: list[str] | None = None) -> pl.DataFrame:
+        """读取策略状态 (按标的过滤可选)."""
+        if not self.table_exists("strategy_states"):
+            return pl.DataFrame()
+        if symbols:
+            placeholders = ", ".join(["?" for _ in symbols])
+            result = self.conn.execute(
+                f"SELECT * FROM strategy_states WHERE symbol IN ({placeholders}) "
+                "ORDER BY symbol",
+                list(symbols),
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                "SELECT * FROM strategy_states ORDER BY symbol"
             ).fetchall()
         if not result:
             return pl.DataFrame()

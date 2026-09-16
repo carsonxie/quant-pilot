@@ -11,11 +11,11 @@
 | 字段                   | 值                                                                  |
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
-| **当前 Phase**   | Phase 0.5 — **M3 完成**（四层池/产品契约/NAV 门槛）→ M4 待启动 |
-| **当前 Task**    | `docs/task-phase0.5.md`（M1 ✅；M2 ✅；M3 ✅；M4 待启动） |
+| **当前 Phase**   | Phase 0.5 — **M5 完成**（B0/B1 基准 + 共用执行基础）→ M6 待启动 |
+| **当前 Task**    | `docs/task-phase0.5.md`（M1 ✅；M2 ✅；M3 ✅；M4 ✅；M5 ✅；M6 待启动） |
 | **Phase 进度**   | Phase 0 代码 T0.1~T0.10 ✅ / §8.1 收尾补项 6 组 ✅（A0-1…A0-6 全部闭合；推送失败持久化转 M2） |
 | **Gate 状态**    | 旧口径 6/6 ✅；spec §8.7 三 Gate 体系下 Phase 0 收尾证据已闭合（`docs/phase0.5-audit.md` §1 全绿）                                 |
-| **最后更新**     | 2026-09-14 (M3 完成: 四层池/产品契约/NAV 门槛, 346/346 测试, M4 待启动) |
+| **最后更新**     | 2026-09-15 (M5 完成: B0/B1 基准/实验记录/同口径, 411/411 测试, M6 待启动) |
 
 ---
 
@@ -345,6 +345,35 @@
 - **已知限制**: 跨境新增买入被 NAV 门槛阻止 → 解锁需 NAV 数据接入（I-03）；复权修订机制随权益事件（M2 扩展/P1）落地
 - **后续动作**: **M4**（目标→建议统一：账户对比、数量规划、优先级、重新进入）
 
+### EV-023 — M4: 调仓规划器与状态化 ATR 止损 🟡
+
+- **日期**: 2026-09-15
+- **类型**: M4 里程碑（目标→建议统一）/ schema 迁移 / settings 参数变更
+- **描述**: M4 交付:
+  - **`rebalance_planner.py`（纯函数）**: 账户估值 `value_account`（NAV=现金+应收+Σ份额×最近可用收盘价; 缺估值价→`paused`, 不静默按 0）；`plan_rebalance` — actual vs target 偏差、绝对百分点 band（`rebalancing.band_points=0.05` 示例）、数量规划（整手 100、佣金 max(率×额, 最低)、滑点估算不重复扣现金）、可卖份额限量、现金分配（卖出先释放; 满额请求按执行顺序分配, 不足缩减并留原因）、普通调整最小金额过滤（不压制风险退出）、卖出依赖 `depends_on` 条件建议、有效期 `valid_days`、四级优先级（风险退出 90 > 常规卖出 50 > 常规买入 30 > 依赖买入 10）
+  - **`strategy_states.py`（C06 关闭）**: 持有期高水位（entry_date 起, 不再是固定 2×ATR 回看窗口）+ 棘轮止损（`enforce_stop_ratchet` 接线, 只上移）+ `pending_exit`（触发未卖出持续提示, 份额归零后转冷却）+ 冷却 `cooldown_until`（阻断新买）+ 重新建仓重置; `RiskManager.calc_atr_series`（Wilder 完整序列, 与 `_calc_atr` 同源）
+  - **schema v5**: `strategy_states` 表（pre_v5 备份 + 副本演练 + 真实库迁移, 内容不变, 幂等）
+  - **daily Step 10**: `rebalance_run.py` — 账户存在且 `rebalancing.account` 配置时执行（事件回放→状态更新→规划→建议落库）; 建议 ID 与目标 ID 按决策日确定（同日重跑确定性去重, 不重复累计）; 新决策日旧开放建议 `replaced`; 失败不阻断 daily（留痕 runs.detail_json）
+  - **settings.yaml 变更（原因: spec §5.4/§5.5/§6.1）**: 新增 `rebalancing` 节（account 默认 null=不生成建议; band_points 示例 0.05; min_trade_amount 500; valid_days 3; cooldown_days 5; lot_size 100; cash_reserve 0）
+- **验证**: 46 项新测试（planner 30 + 状态 14 + daily 集成 2 净增）→ 全量 **395/395**; ruff 零新增（存量 UP045 除外）; 真实数据副本干跑: ①账户触发状态化止损（510300/518880）→ 优先 90 SELL 不受带宽压制; ②510500 实际 27.4% → 卖 900 份调回 20%（band）; ③同日重跑 0 新增/2 去重
+- **影响范围**: rebalance_planner.py / strategy_states.py / rebalance_run.py（新）, risk_manager（序列化 ATR）, daily_pipeline（Step 10/摘要/运行记录）, proposal_ledger（mark_stale_replaced）, duckdb_manager（v5/entry_dates/替代查询）, settings; audit C03/C04/C05/C06/C07/C11/C20/C21
+- **已知限制**: `rebalancing.account` 为空时 daily 不生成建议; 现金顺序分配非全局最优（差额留待下一轮）; 回测引擎未接状态化 ATR（P1 登记）
+- **后续动作**: **M5**（B0/B1 基准 + 主动策略共用规划与执行基础, 独立模拟账户）
+
+### EV-024 — M5: B0/B1 基准模拟、实验记录与同口径对照 🟡
+
+- **日期**: 2026-09-15
+- **类型**: M5 里程碑（基准与对照接入）/ settings 参数变更
+- **描述**: M5 交付:
+  - **`backtest/baseline.py`**: B0 固定初始配置买入持有（首日盘后下单 → 次日开盘成交, 此后不调整）; B1 固定目标 + 绝对百分点 band（检查日 = 每周最后交易日, 用**模拟实际份额**计算漂移, 整手向最近调回）; 执行基础与实盘一致（T+1 开盘/卖出先于买入/批次可卖/整手 100/佣金 max(率×额, 最低)/滑点含价/现金不足缩减）; 逐笔费用与事件留痕; 无外部现金流为默认口径, 入金按"同额同日"预先声明（B0 政策 `hold_cash` 显式）
+  - **`backtest/baseline_runner.py` + CLI `uv run baseline`**: 固定研究配置（`settings.baselines`）执行 → `experiments` 表记录（kind/代码/数据/池/配置 JSON/成本情景/结果位置/状态/结论）→ NAV 序列与摘要落 `data/backtests/`; 实验 ID 含成本情景名（不同情景不互相覆盖）
+  - **settings.yaml 变更（原因: spec §5.1/§5.4/§6.3）**: 新增 `baselines` 节 — **研究示例**（来源 docs/讨论2.md"股 70%/黄金 10%/现金 20%"）: 6 只股票 ETF 合计 70% + 518880 黄金 10% + 现金 20%; band_points=0.05; initial_cash=100000（与回测一致）; `b0_cash_policy=hold_cash`
+  - **schema**: 无新表（experiments 由 v3 DDL 承载）; `upsert_experiment`/`get_experiment` 新方法
+- **验证**: 16 项新测试（B0 手工余额核对、B1 漂移调回 600 份手算、检查日、T+1 不可卖、滑点含价、同口径/确定性、实验记录与场景、入金政策、同执行基础）→ 全量 **411/411**; ruff 零新增; 真实数据副本（`rehearsal_m5.duckdb`, 2019-01-02→2026-09-11）: **B0 +104.72% / 回撤 −31.04% / 7 笔 / 费用 58.75 元; B1 +102.16% / 回撤 −29.84% / 14 笔 / 费用 112.36 元**（再平衡降回撤、增费用）; 入金测试（2024-06-03 各 20000 元）两账户独立
+- **影响范围**: baseline.py / baseline_runner.py（新）, duckdb_manager（experiments 方法）, settings, pyproject（baseline CLI）, README（基准运行说明）; P05-D4 闭合, D6/D7 部分
+- **已知限制**: 真实数据含未调整拆分跳变（I-09）→ 拆分年（如 2022）可能触发非策略性再平衡, 报告须标注干扰；B0/B1 按不复权口径比较（CALIBER_NOTE）
+- **后续动作**: **M6**（基础绩效/入金不计收益/贡献闭合、实验记录补全、面板扩展与净值对照）
+
 ---
 
 ## 四、关键产出索引
@@ -377,6 +406,12 @@
 | 信号面板数据层                      | `dashboard/data_loader.py`                      | P0    | ✅ 🆕                        |
 | Streamlit 信号面板                   | `dashboard/app.py`                              | P0    | ✅ 冒烟通过 🆕               |
 | 面板数据层测试 (16 tests)            | `tests/test_dashboard.py`                       | P0    | ✅ 全部通过 🆕               |
+| 账户账本 (事件/回放/批次)            | `src/data_pipeline/accounting.py`               | M2    | ✅ 🆕                        |
+| 建议/反馈账本 (状态机)               | `src/orchestration/proposal_ledger.py`          | M2    | ✅ 🆕                        |
+| 四层池与产品契约                     | `src/strategies/etf_pool.py`, `product_compare.py` | M3 | ✅ 🆕                        |
+| 调仓规划器 (目标→建议)               | `src/strategies/rebalance_planner.py`           | M4    | ✅ 🆕                        |
+| 持有期状态 (高水位/棘轮/冷却)        | `src/strategies/strategy_states.py`             | M4    | ✅ 🆕                        |
+| 调仓编排 (账户→状态→建议落库)        | `src/orchestration/rebalance_run.py`            | M4    | ✅ 🆕                        |
 
 ---
 
@@ -410,12 +445,12 @@
 10. ~~T0.9: 自研回测循环 v0.1~~ (已完成 — EV-013; 偏差 0.044% < 1%, 交收差一天 ✓, 20 tests)
 11. ~~T0.10: Streamlit 信号面板~~ (已完成 — EV-014; AppTest 冒烟 + headless 服务验证, 16 tests)
 12. **🎉 P0 Phase 完成 (旧口径)** (2026-09-13): 交付物 10/10, Gate 6/6
-13. **当前: Phase 0.5 — M3 ✅ 完成（四层池 + 产品契约 + NAV 门槛）, 待确认启动 M4** (2026-09-14)
-    - M1/M2/M3 交付: A 类纠偏 + Phase 0 收尾 + AGENTS v3.0; 账户/四类记录/schema v3; 四层池/schema v4
-    - 关键产出: 346/346 测试; `data/backups/` pre_v2/v3/v4 快照与演练; 跨境禁买（I-03 解锁路径）
-    - 下一步 M4: 目标→建议统一（共用规划器、数量/现金/可卖/优先级/有效期、band 再平衡、卖出依赖、重新进入与冷却）
+13. **当前: Phase 0.5 — M5 ✅ 完成（B0/B1 基准 + 实验记录 + 同口径）, 待确认启动 M6** (2026-09-15)
+    - M1–M5 交付: A 类纠偏 + Phase 0 收尾 + AGENTS v3.0; 账户/四类记录/schema v3; 四层池/schema v4; 调仓规划/状态化止损/schema v5; B0/B1 基准与实验记录
+    - 关键产出: 411/411 测试; `data/backups/` pre_v2→v5 快照与演练副本; `uv run baseline` CLI; 基准真实数据结果（B0 +104.72%/−31.04%, B1 +102.16%/−29.84%, 研究示例配置）
+    - 下一步 M6: 基础绩效（期末−期初−净入金=投资盈亏）、入金不计收益、贡献与差额单列、面板扩展（实际/目标、待处理建议、B0/B1/A 净值对照）
     - 纪律: 每批"实现→验证→更新审计/任务→停靠汇报", 待用户确认后进入下一节
-14. ✅ 全量测试: 280/280 通过 (2026-09-14)
+14. ✅ 全量测试: 411/411 通过 (2026-09-15)
 15. 📋 常用运行命令见 §七 (面板/取数/回测/测试)
 16. 参考: `docs/task-phase0.5.md`; `docs/spec.md` v3.0 §8/§9; `docs/plan.md` M1–M7
 
@@ -439,9 +474,13 @@ uv run backtest
 # 账户事件导入 (标准 CSV; 重复导入自动去重; 模板 docs/account_events_template.csv)
 uv run account-import --account REAL-1 --name "项目账户" --mode real --csv events.csv
 
+# 基准模拟 (M5; B0 买入持有 / B1 阈值再平衡; 研究示例配置; 结果写 data/backtests/)
+uv run baseline --strategy B0 --start 2019-01-02 --end 2026-09-11
+uv run baseline --strategy B1 --write-account     # 同时把模拟账户写入数据库
+
 # Streamlit 信号面板 (默认 http://localhost:8501)
 uv run streamlit run dashboard/app.py
 
-# 全量测试 (242)
+# 全量测试 (411)
 uv run pytest tests/ -v
 ```
