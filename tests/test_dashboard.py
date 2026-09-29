@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -327,3 +327,146 @@ def test_streamlit_app_renders_without_exception():
     assert any(
         "数据截止" in c.value and "策略版本" in c.value for c in at.caption
     )
+    # M6-04: 账户视图区块存在 (真实库当前无账户 → 显示未配置提示)
+    subheaders = " | ".join(s.value for s in at.subheader)
+    assert "实际 vs 目标" in subheaders
+    assert "待处理建议与反馈" in subheaders
+    assert "净值对照" in subheaders
+    assert any("未配置账户" in i.value for i in at.info)
+
+
+# ------------------------------------------------------------------
+# M6: 账户视图 (实际/目标 / 对照 / 待处理建议 / 运行状态)
+# ------------------------------------------------------------------
+
+@pytest.fixture()
+def seeded_account_db(tmp_path: Path) -> str:
+    """临时库: 行情 + 账户事件 + 目标 + 建议 + 运行记录 (M6 面板数据)."""
+    from data_pipeline.accounting import AccountEvent, AccountService
+
+    path = str(tmp_path / "account_dash.duckdb")
+    db = DuckDBManager(path)
+    db.init_database()
+    df = make_ohlcv(SYMBOLS)
+    db.upsert_ohlcv(df)
+    days = sorted(df["date"].unique().to_list())
+    first, last = days[0], days[-1]
+
+    svc = AccountService(db)
+    svc.ensure_account("BASE-B0", "B0 基准 (研究示例)", mode="backtest")
+    svc.import_events([
+        AccountEvent(event_id="b0-init", account_id="BASE-B0",
+                     event_type="initial",
+                     event_time=datetime(first.year, first.month, first.day),
+                     amount=100000.0),
+        AccountEvent(event_id="b0-buy", account_id="BASE-B0", event_type="trade",
+                     event_time=datetime(first.year, first.month, first.day, 15),
+                     symbol="510300", side="BUY", shares=10000.0, price=1.0,
+                     fee=7.5),
+    ])
+    # 目标与建议 (关联账户)
+    db.upsert_target(pl.DataFrame([{
+        "target_id": "target-test", "strategy_id": "five-funnel",
+        "strategy_version": "v0.2", "mode": "research",
+        "as_of": last, "decision_time": datetime(last.year, last.month, last.day),
+        "data_version": str(last), "pool_version": "uv-test",
+        "config_version": "v0.2", "reason": "面板测试",
+    }]))
+    db.replace_target_weights("target-test", pl.DataFrame([
+        {"target_id": "target-test", "symbol": "510300", "target_weight": 0.30},
+        {"target_id": "target-test", "symbol": "510050", "target_weight": 0.10},
+        {"target_id": "target-test", "symbol": "__CASH__", "target_weight": 0.60},
+    ]))
+    db.insert_proposals(pl.DataFrame([{
+        "proposal_id": "P-dash-1", "target_id": "target-test",
+        "account_id": "BASE-B0", "account_as_of": None,
+        "symbol": "510300", "side": "SELL", "shares": 5000.0,
+        "ref_price": 1.0, "ref_time": None, "est_amount": 5000.0,
+        "est_fee": 3.75, "target_weight": 0.30, "actual_weight": 0.50,
+        "valid_until": None, "priority": 50, "depends_on": None,
+        "status": "proposed", "reason": "面板测试建议",
+    }]))
+    db.insert_run(pl.DataFrame([{
+        "run_id": "daily-test", "run_type": "daily", "run_date": last,
+        "mode": "research", "strategy_version": "v0.2",
+        "data_version": str(last), "status": "ok",
+        "detail_json": '{"signals": 3}', "started_at": datetime.now(),
+        "finished_at": datetime.now(),
+    }]))
+    db.close()
+    return path
+
+
+class TestAccountViews:
+    def test_account_summaries_include_backtest_mode(self, seeded_account_db):
+        from dashboard.data_loader import load_account_summaries
+
+        summaries = load_account_summaries(seeded_account_db)
+        assert summaries.height == 1
+        row = summaries.row(0, named=True)
+        assert row["账户"] == "BASE-B0"
+        assert row["模式"] == "模拟(回测)"
+        # 期初 = 初始资本 − 费用 7.5 (起点日费用还原口径: nav_start=100000)
+        assert row["期初"] == pytest.approx(100000.0)
+
+    def test_nav_comparison_and_actual_vs_target(self, seeded_account_db):
+        from dashboard.data_loader import (
+            build_actual_vs_target,
+            build_nav_comparison,
+        )
+
+        wide = build_nav_comparison(seeded_account_db)
+        assert "BASE-B0" in wide.columns
+        assert wide["BASE-B0"][0] == pytest.approx(100.0)  # 首日归一
+
+        table = build_actual_vs_target(seeded_account_db, "BASE-B0")
+        rows = {row["代码"]: row for row in table.iter_rows(named=True)}
+        assert rows["510300"]["目标权重"] == "30.0%"
+        assert rows["510300"]["实际权重"] != "-"
+        # 偏离列存在; 现金行展示目标
+        assert rows["__CASH__"]["目标权重"] == "60.0%"
+
+    def test_pending_proposals_and_feedback_column(self, seeded_account_db):
+        from dashboard.data_loader import load_pending_proposals
+
+        pending = load_pending_proposals(seeded_account_db, "BASE-B0")
+        assert pending.height == 1
+        row = pending.row(0, named=True)
+        assert row["方向"] == "SELL"
+        assert row["状态"] == "proposed"
+        assert row["反馈"] == "—"
+
+    def test_latest_run_status(self, seeded_account_db):
+        from dashboard.data_loader import load_latest_run
+
+        run = load_latest_run(seeded_account_db)
+        assert run is not None
+        assert run["status"] == "ok"
+        assert run["detail"]["signals"] == 3
+
+    def test_read_only_connection_does_not_write(self, seeded_account_db):
+        """只读连接: 面板读取不改变库文件内容 (C21)."""
+        import os
+
+        from dashboard.data_loader import (
+            build_actual_vs_target,
+            load_account_summaries,
+        )
+
+        before = os.path.getmtime(seeded_account_db)
+        load_account_summaries(seeded_account_db)
+        build_actual_vs_target(seeded_account_db, "BASE-B0")
+        assert os.path.getmtime(seeded_account_db) == before
+
+    def test_empty_accounts_return_empty_frames(self, seeded_db):
+        from dashboard.data_loader import (
+            build_actual_vs_target,
+            build_nav_comparison,
+            load_account_summaries,
+            load_pending_proposals,
+        )
+
+        assert load_account_summaries(seeded_db).is_empty()
+        assert build_nav_comparison(seeded_db).is_empty()
+        assert build_actual_vs_target(seeded_db, None).is_empty()
+        assert load_pending_proposals(seeded_db).is_empty()

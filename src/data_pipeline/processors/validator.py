@@ -75,6 +75,7 @@ def validate_ohlcv(
     price_limits: dict[str, float] | None = None,
     default_price_limit: float = DEFAULT_DAILY_LIMIT,
     price_limit_buffer: float = DEFAULT_LIMIT_BUFFER,
+    registered_equity_events: pl.DataFrame | None = None,
 ) -> list[QualityIssue]:
     """对 OHLCV DataFrame 执行全量质量检查.
 
@@ -85,6 +86,8 @@ def validate_ohlcv(
         price_limits: symbol → 涨跌幅限制 (小数, 如 0.20); 未列出用 default_price_limit
         default_price_limit: 默认涨跌幅限制 (0.10 = 10% 板)
         price_limit_buffer: 超限容差; (limit, limit+buffer] 为警告复核区
+        registered_equity_events: 已登记权益事件 (M8/I-09 方案1) — 列 symbol/event_date/ratio;
+            命中日期与预期因子一致的超限跳变 → 记为已登记 (info, 不阻断); 未登记仍按原规则。
 
     Returns:
         QualityIssue 列表 (空列表 = 全部通过)
@@ -98,6 +101,7 @@ def validate_ohlcv(
         limits=price_limits,
         default_limit=default_price_limit,
         buffer=price_limit_buffer,
+        registered_events=registered_equity_events,
     ))
 
     if critical_only:
@@ -113,6 +117,7 @@ def validate_ohlcv(
     # 汇总日志
     criticals = [i for i in issues if i.severity == "critical"]
     warnings = [i for i in issues if i.severity == "warning"]
+    infos = [i for i in issues if i.severity == "info"]
 
     if criticals:
         logger.error("Data quality: %d critical issue(s)", len(criticals))
@@ -123,6 +128,9 @@ def validate_ohlcv(
         logger.warning("Data quality: %d warning(s)", len(warnings))
         for wi in warnings:
             logger.warning("  WARNING [%s]: %s", wi.check, wi.detail)
+
+    for inf in infos:
+        logger.info("  INFO [%s]: %s", inf.check, inf.detail)
 
     if not issues:
         logger.info("Data quality: all checks passed (%d rows)", len(df))
@@ -168,21 +176,27 @@ def _check_daily_change(
     limits: dict[str, float] | None = None,
     default_limit: float = DEFAULT_DAILY_LIMIT,
     buffer: float = DEFAULT_LIMIT_BUFFER,
+    registered_events: pl.DataFrame | None = None,
 ) -> list[QualityIssue]:
-    """产品感知的单日涨跌幅检查 (C10, spec §4.4).
+    """产品感知的单日涨跌幅检查 (C10, spec §4.4; M8 拆分感知).
 
     规则:
       - |涨跌| ≤ 产品限制 → pass
       - 限制 < |涨跌| ≤ 限制+容差 → warning (疑似权益事件/舍入, 保留数据待核验)
-      - |涨跌| > 限制+容差 → critical (疑似数据损坏或未调整权益事件, 阻断)
+      - |涨跌| > 限制+容差 →
+          命中已登记权益事件 (日期 + 比例一致) → 已登记 (info, 不阻断)
+          未登记 → critical (疑似数据损坏或未调整权益事件, 阻断)
 
-    真实极端行情不修改数据; 20% 板产品 (如 159915/588000) 经 limits 传入.
+    真实极端行情不修改数据; 20% 板产品 (如 159915/588000) 经 limits 传入。
 
     Args:
         df: OHLCV 数据 (需 symbol/date/close)
         limits: symbol → 涨跌幅限制 (小数)
         default_limit: 默认限制 (0.10 = 10% 板)
         buffer: 超限容差 (0.02 = 2 个百分点)
+        registered_events: 已登记权益事件 (列 symbol/event_date/ratio; M8/I-09 方案1);
+            ratio 语义: price_factor — 期望后一收盘 ≈ 前一收盘 / ratio。
+            比例一致性判据: |实际变动 / 期望变动 − 1| ≤ 5% (比例 > 2 时) 否则 2pp。
     """
     issues: list[QualityIssue] = []
 
@@ -190,15 +204,73 @@ def _check_daily_change(
         return issues
 
     limits = limits or {}
+    events_by_key: dict[tuple[str, object], float] = {}
+    if registered_events is not None and not registered_events.is_empty():
+        required = {"symbol", "event_date", "ratio"}
+        if required <= set(registered_events.columns):
+            events_by_key = {
+                (str(row["symbol"]), row["event_date"]): float(row["ratio"])
+                for row in registered_events.iter_rows(named=True)
+                if row["ratio"] is not None
+            }
+
     for sym in df["symbol"].unique().to_list():
         sym_df = df.filter(pl.col("symbol") == sym).sort("date")
         if len(sym_df) < 2:
             continue
 
         limit = float(limits.get(sym, default_limit))
-        abs_pct = sym_df["close"].pct_change().abs()
+        sym_df = sym_df.with_columns(
+            pl.col("close").shift(1).alias("_prev_close"),
+            pl.col("close").pct_change().alias("_ret"),
+        )
+
+        registered_dates: list[object] = []
+        registered_details: list[str] = []
+        if events_by_key:
+            for row in sym_df.iter_rows(named=True):
+                key = (str(row["symbol"]), row["date"])
+                if key not in events_by_key:
+                    continue
+                ret = row["_ret"]
+                prev_close = row["_prev_close"]
+                if ret is None or prev_close in (None, 0):
+                    continue
+                ratio = events_by_key[key]
+                if ratio <= 0:
+                    continue
+                expected = 1.0 / ratio - 1.0  # price_factor: 拆分后理论变动
+                if (
+                    abs(ret - expected) <= 0.02  # 2 个百分点容差 (源数据/舍入)
+                    or abs(ret - expected) <= 0.05 * abs(expected)
+                ):
+                    registered_dates.append(row["date"])
+                    registered_details.append(
+                        f"{row['date']}(实际{ret:+.2%} vs 登记因子{ratio:g}≈{expected:+.2%})"
+                    )
+
+        registered_mask = pl.Series(
+            "_registered",
+            [d in registered_dates for d in sym_df["date"].to_list()],
+            dtype=pl.Boolean,
+        )
+        sym_df = sym_df.with_columns(registered_mask)
+        abs_pct = sym_df["_ret"].abs()
         soft_mask = (abs_pct > limit) & (abs_pct <= limit + buffer)
-        hard_mask = abs_pct > limit + buffer
+        hard_mask = (abs_pct > limit + buffer) & ~sym_df["_registered"]
+
+        if registered_dates:
+            issues.append(QualityIssue(
+                check="registered_equity_event",
+                severity="info",
+                symbol=sym,
+                detail=(
+                    f"{len(registered_dates)} row(s) 命中已登记权益事件 (M8/I-09 方案1): "
+                    + "; ".join(registered_details[:4])
+                ),
+                sample_rows=len(registered_dates),
+            ))
+
         soft_count = int(soft_mask.sum())
         hard_count = int(hard_mask.sum())
 
@@ -221,6 +293,14 @@ def _check_daily_change(
                 sym_df.filter(hard_mask).select("date").head(5)["date"].to_list()
             )
             max_deviation = float(abs_pct.filter(hard_mask).max())
+            hint = (
+                "疑似数据损坏或未调整权益事件(拆分/分红), 需人工核验"
+                if not events_by_key
+                else (
+                    "疑似数据损坏或未登记权益事件, 需人工核验; 如为已知权益事件可登记 "
+                    "(scripts/register_equity_events.py)"
+                )
+            )
             issues.append(QualityIssue(
                 check="extreme_daily_change",
                 severity="critical",
@@ -230,7 +310,7 @@ def _check_daily_change(
                     f"(product limit {limit:.0%} + tolerance {buffer:.0%}), "
                     f"max deviation = {max_deviation:.2%}, "
                     f"example dates: {[str(d) for d in extreme_dates]} — "
-                    f"疑似数据损坏或未调整权益事件(拆分/分红), 需人工核验"
+                    f"{hint}"
                 ),
                 sample_rows=hard_count,
             ))

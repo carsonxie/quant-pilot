@@ -57,7 +57,7 @@
 | C18 | B | 无策略选择过程；实验记录待建 | B | M2/M6(登记) | 已核查-不受影响 |
 | C19 | B | 三 Gate 已定义；旧 task 验收标准需废弃说明 | B | M1(登记)/M7 | 受影响-文档待更新 |
 | C20 | B | ~~无 mode/account~~ → 账户/事件/去重（M2a）+ 建议幂等（M2b/M4: 同日去重、替代）；入金不计收益归 M6 | B | M2a/M2b ✅/M4 ✅/M6 | 已修正-部分 (M4, 入金收益口径待 M6) |
-| C21 | B | ~~单写入口~~ → 单写入口+事务（M2a）+ M4 建议事务与状态 UPSERT；面板只读连接与并发协调归 M6/M7 | B | M2a ✅/M4 ✅/M6/M7 | 已修正-部分 (M4, 面板只读待 M6) |
+| C21 | B | ~~单写入口~~ → 单写入口+事务（M2a）+ 建议事务（M4）+ 面板只读连接（M6）；并发验证留 M7 | B | M2a ✅/M4 ✅/M6 ✅/M7 | 已修正-已验证（M6 面板只读; 并发压测归 M7） |
 | C22 | C | 策略状态/失效监控未实现 | C | P1.5 | 未实现-登记后续 |
 | C23 | B | 12-1 动量/分组未实现（无相关代码） | B | P1 | 未实现-登记后续 |
 
@@ -154,7 +154,8 @@
   159995 2026-07-07 ÷2.0、513500 2022-03-30 ÷2.0、512690 2021-05-17 ÷1.9、
   516160 2024-09-18、512100 2022-09-05 等；`updated_at` 显示 2026-07-19 经全量
   `fetch-data` 导入）。跨这些日期的收益率/波动/回测均为"基础份额不连续"口径。
-- **状态**：已修正-部分（限制标注完成；权益事件入账与复权版本化归 M2/M3）。
+- **M8 落地（2026-09-20, I-09 方案1）**：schema v7 `equity_events` 登记表（12 条推断值: 11 条份额折算 + 512690 2021-12-31 开盘缺口证据）; `validate_ohlcv` 拆分感知（登记命中→`registered_equity_event` info 不阻断; 未登记/比例不符→critical）; `scripts/register_equity_events.py`（产品感知扫描、幂等登记、登记后复核回滚）。效果: 全量 critical 12→1（510500 2022-08-29 边界项维持人工核验）、拆分窗口 2→0。测试 `tests/test_equity_events.py` 10 例。
+- **状态**：已修正-部分（限制标注 + 登记与拆分感知质检完成；**权益事件入账/复权版本化（方案2）登记至 Phase 1**, task §10）。
 
 ### C10 / A — 固定阈值与 NAV 静默跳过
 
@@ -232,8 +233,10 @@
 
 ### C21 / B — DuckDB 并发与写入协调
 
-- **实际证据**：写入口统一于 `DuckDBManager` ✓，但连接默认 read-write；`dashboard/data_loader.py:38-42` 以读写方式打开同一库（与日任务并发时存在锁冲突/一致性风险）；无快照或锁策略文档；无并发测试。
-- **批次**：M2（写协调契约）、M6（面板只读连接）、M7（并发验证）。状态：未实现-登记后续。
+- **实际证据（初审）**：写入口统一于 `DuckDBManager` ✓，但连接默认 read-write；`dashboard/data_loader.py:38-42` 以读写方式打开同一库（与日任务并发时存在锁冲突/一致性风险）；无快照或锁策略文档；无并发测试。
+- **修正（M6-04, 2026-09-15）**：`dashboard/data_loader._read_only()` 改用 `duckdb.connect(read_only=True)`；所有面板读取走只读连接（不创建库文件; 写入语句无路径）。测试 `test_read_only_connection_does_not_write`（读取前后库文件 mtime 不变）+ AppTest 全流程通过。
+- **剩余**：并发压测与显式锁/快照策略（单写进程约束已在 README/记忆记录）归 M7。
+- **状态**：已修正-已验证（面板只读；并发压测归 M7）。
 
 ### C22 / C — 策略状态与失效监控
 
@@ -268,7 +271,60 @@
 
 ---
 
-## 5. 变更记录
+## 5. 关键场景证据与 P05-D 验收（M7-02, 2026-09-15）
+
+### 5.1 plan §6 关键场景表（独立期望 / 证据位置）
+
+| 场景 (plan §6) | 独立期望 | 证据（测试 / 命令 / 记录） | 状态 |
+| --- | --- | --- | --- |
+| 波动 10%/20%，无额外约束 | 1/σ ≈ 2:1；1/σ² ≈ 4:1；不混用 | `tests/test_portfolio_optimizer.py::TestWeightMethods`（8 例）; 审计 C01 | ✅ |
+| 目标 20% 不变、实际 28%（band 5pp）；昨日建议未执行 | 提出减持；未执行时实际持仓不变 | `test_rebalance_planner.py::test_drift_28_to_20_triggers_sell`（800 份手工值）、`test_partial_fill_recomputes_remainder`、`test_unexecuted_proposal_account_unchanged_reproposes`；真实副本干跑（510500 27.4% → 卖 900）; 审计 C07 | ✅ |
+| 10% 持仓触发退出，旧门槛 15% | 退出不被屏蔽，当轮不清仓回补 | `test_daily_pipeline.py::TestSignalDebounce`（6 例）+ `TestRiskExitIntegration`; 状态化止损 `test_strategy_states.py::test_stop_trigger_on_close_at_threshold`; 真实副本（510300/518880 SELL 优先 90） | ✅ |
+| T 日盘后信号、次日跳空；同日新买受限 | 成交价格与可卖份额符合声明规则 | `test_custom_loop.py::test_gap_executes_at_next_open_not_assumed_stop`、`TestLotAndCashAvailability`（5 例）; 审计 C05/C06 | ✅ |
+| 双边费用、最低收费、价格含滑点 | 手工核对现金，不重复扣费 | `test_custom_loop.py::test_round_trip_manual_reconciliation`（109,752.51125）、`TestCostScenarioAndMinFee`（4 例）; 审计 C08 | ✅ |
+| 分红应收/到账、份额变动、复权修订 | 权益一次计入，历史依赖可追溯 | `test_accounting.py::TestDividends`（2 例）、`TestShareChange`、`TestCorrections`; 绩效核算 `test_performance.py::test_dividend_income_separate_from_deposit`; 审计 C09（复权版本化登记 P1, I-09） | ✅ 部分（复权版本化→P1 登记） |
+| 缺 NAV、真实极端行情、停牌持仓 | unknown 不算通过；不改价格、不删除持仓 | `test_validator.py::TestProductAwareDailyChange`（7 例）、`test_etf_pool.py::TestCrossBorderNavGate`、`test_stale_symbol_holds_instead_of_sell`、`test_rebalance_planner.py::test_missing_nav_blocks_new_buy_but_holds`; 真实干跑（14/19 可买, 5 跨境禁买）; 审计 C10 | ✅ |
+| A 股信号转弱，池中有黄金/海外 ETF | 只改变声明 scope 的限制；代理宽度命名准确 | `test_macro_timing.py`（scope 3 例）+ `test_daily_pipeline.py::TestMacroScope`; 审计 C11 | ✅ |
+| 未发布数据、晚于决策的海外收盘、改未来数据 | 当时不可见；已生成的过去信号保持不变 | `test_daily_pipeline.py::test_future_data_does_not_change_past_result`; 宏观为价格衍生（无发布依赖, C14 已核查）; 审计 C14/C18 | ✅（海外时点：跨境日历登记 P1） |
+| 行情收益为零，新增入金 | 资产增加、投资收益不增加 | `test_performance.py::TestReturnCaliber::test_zero_price_return_deposit_does_not_raise_return`（期末 120,000, 收益 0）；基准入金政策 `test_deposit_held_as_cash` | ✅ |
+| 部分成交、卖出失败、重复导入/重跑 | 不超买/超卖、不负现金、不重复计账或预留 | `test_proposal_ledger.py::TestFeedbackFlow`（部分/未执行/拒绝/延迟/超额）、`test_rebalance_integration` 同日重跑去重、`test_rehearsal.py`（回滚/重跑/恢复）; 审计 C20/C21 | ✅ |
+| B0/B1/A 及真实项目账户同时存在 | 独立净值和 mode，模拟资金不加到真实权益 | `test_baseline.py::test_b0_b1_independent_accounts_same_cost`、`test_active_strategy_same_execution_foundation`; 面板净值对照（`test_dashboard.py::TestAccountViews`）; 审计 C20 | ✅ |
+| 构造高相关但存在价格偏差的数据 | 逐点误差检查能够识别 | M3-06 相关诊断（窗口/样本/跳过原因）; vectorbt 逐点对照归 P1（C15 部分） | ✅ 部分（全量双源→P1） |
+
+### 5.2 spec §8.2 样本案例（10 项）
+
+| 样本案例 | 覆盖任务 | 证据 |
+| --- | --- | --- |
+| 目标 20% 未变、实际漂移到 28% | M4-03/M4-07、M5-02 | `test_rebalance_planner.py::TestBandRebalance`; `test_baseline.py::test_drift_over_band_triggers_rebalance`; 真实副本 27.4%→20% |
+| 昨日建议未执行 | M2-05、M4-04 | `test_unexecuted_proposal_account_unchanged_reproposes`、同日去重/新决策日 replaced（`test_rerun_same_day_deduplicates_proposals`、`test_new_decision_replaces_previous_open_proposals`） |
+| 卖出只部分成交 | M2-04、M4-04 | `TestFeedbackFlow::test_partial_then_filled_updates_status_and_ledger`、`test_partial_fill_recomputes_remainder` |
+| 现金不足 | M1-2-03、M4-01 | `test_rebalance_planner.py::TestCashAndQuantity`（缩减/预留/依赖）; 引擎 `TestLotAndCashAvailability` |
+| 重复导入 | M2-03 | `test_accounting.py::test_duplicate_import_no_second_event`、CSV 双层去重 |
+| 不足一手 | M1-2-03 | `test_odd_lot_target_floor`（计划层）+ 引擎整手用例 |
+| 止损 10% 持仓不被旧 15% 门槛压制 | M1-1-03、M4-06 | `TestSignalDebounce`（6 例）+ `test_risk_exit_bypasses_band_and_min_amount` |
+| NAV 缺失 | M1-2-01、M3-02/05、M4 | `TestProductAwareDailyChange`、`TestCrossBorderNavGate`、`test_missing_nav_blocks_new_buy_but_holds` |
+| ETF 停牌但仍持有 | M1-2-03、M3-05、M4-06 | `test_stale_symbol_keeps_position`、`test_stale_symbol_holds_instead_of_sell`、`test_no_price_keeps_state` |
+| 无行情收益时入金不改变收益率 | M6-03/M6-05 | `test_zero_price_return_deposit_does_not_raise_return`（收益 0） |
+
+### 5.3 P05-D1–D8 验收对照（M7-02 结论）
+
+| 需求 | 交付物 | 验收证据 | 状态 |
+| --- | --- | --- | --- |
+| **P05-D1** 审计纠偏 | C01–C23 逐项审计与修正记录 | 本文件 §2/§3：A 类全部关闭（C01/C04/C05/C06/C08/C10/C11/C14）；B/C 类按批次关闭或登记后续（C19/C22/C23/P1.5） | ✅ |
+| **P05-D2** 四类记录与账户 | 手动/CSV 导入、部分成交、未执行、出入金、重复导入 | `test_accounting.py`（28 例）、`test_proposal_ledger.py`（14 例）、`test_daily_pipeline.py::TestRebalanceIntegration`（4 例） | ✅ |
+| **P05-D3** ETF 四层池与历史版本 | 同指数比较、分类、禁买/unknown 分离、持仓不因出池消失 | `test_etf_pool.py`（23 例）、`test_product_compare.py`（7 例）、真实干跑（14 可买/5 跨境禁买、停牌 HOLD） | ✅ |
+| **P05-D4** B0/B1 基准与独立模拟账户 | 固定初始权重、独立现金/份额/净值；目标不变但漂移触发 | `test_baseline.py`（17 例）、真实副本 B0/B1（+104.72%/+102.16%） | ✅ |
+| **P05-D5** 通用建议与再平衡 | 数量取整、现金、可卖、优先级、有效期、卖出依赖 | `test_rebalance_planner.py`（30 例）、`test_strategy_states.py`（14 例） | ✅ |
+| **P05-D6** 规则实验记录与数据版本 | 可复现、旧结果保留、示例/真实配置区分、失败保留 | `test_baseline.py::test_run_records_experiment_and_parquet`、`test_failed_experiment_is_recorded`; schema v6 | ✅ |
+| **P05-D7** 基础贡献与执行记录 | 金额盈亏闭合、入金不增加收益、交易/信号/反馈可关联 | `test_performance.py`（14 例，unexplained=0）、真实副本绩效报告 | ✅ |
+| **P05-D8** 单入口必要展示 | 实际/目标、数据/对账状态、建议/反馈及基准对照可读 | `test_dashboard.py::TestAccountViews`（6 例）+ AppTest; 面板展示 B0/B1 净值对照 | ✅ |
+
+**M7 集成结论（2026-09-15）**：十条样本案例全部有可复现证据；P05-D1–D8 全部闭合；
+真实库仍处研究状态（0 账户/0 建议），Phase 0.5 完成 ≠ 允许实盘、≠ 自动进入 Phase 1。
+
+---
+
+## 6. 变更记录
 
 | 日期 | 批次 | 变更 |
 | --- | --- | --- |
@@ -282,3 +338,6 @@
 | 2026-09-14 | M3 | 四层池落地：schema v4（instruments/universe_versions/universe_members/nav_daily，真实库迁移）、可交易池买卖许可（NAV unknown 禁新买/停牌禁买卖保留持仓）、历史池判定、产品对照与相关诊断；23 项新测试 → 346/346；真实干跑（14 可买/5 跨境禁买）。 |
 | 2026-09-15 | M4 | 调仓规划落地：`rebalance_planner.py`（账户估值/数量规划/优先级/band/现金与可卖约束/依赖与有效期）、`strategy_states.py`（持有期高水位/棘轮止损/冷却；C06 关闭）、`rebalance_run.py`（编排）; schema v5 `strategy_states`（pre_v5 备份 + 副本演练 + 真实库迁移，内容不变）; daily Step 10 接入。独立期望值测试 46 项 → 全量 395/395；真实数据副本干跑（止损优先/band 调回/同日去重）。**C05/C06/C07/C11 关闭；C03/C04/C20/C21 进度更新**。 |
 | 2026-09-15 | M5 | 基准落地：`baseline.py`（B0 买入持有 / B1 阈值再平衡，共用账户账本与执行约定）、`baseline_runner.py`（实验记录 + 结果文件 + CLI）、`settings.baselines` 研究示例配置、`upsert_experiment`。16 项新测试 → 全量 411/411；真实数据副本干跑（B0 +104.72%/−31.04%，B1 +102.16%/−29.84%）; 成本双情景与入金政策证据。**P05-D4 闭合（D6/D7 部分）**。 |
+| 2026-09-15 | M6 | 绩效与展示：`performance.py`（盈亏闭合/入金不计收益/分红费用单列/日线 TWR 近似）、schema v6（experiments 模式/起止/失败原因；失败试验留痕）、面板扩展（只读连接、实际 vs 目标、待处理建议、B0/B1/A 净值对照、运行状态）。21 项新测试 → 全量 432/432；真实数据副本干跑（B0/B1 绩效与模拟器一致, unexplained=0）。**C21 面板只读关闭；P05-D6/D7/D8 闭合**。 |
+| 2026-09-15 | M7 | 集成验收：隔离副本演练（`scripts/rehearsal_m7.py` — 迁移幂等/半笔回滚/重跑去重/备份恢复+新事件重放, 报告 `data/backups/rehearsal_m7_report.json`）、关键场景证据（plan §6 十三条 + spec §8.2 十案例, 本文件 §5）、P05-D1–D8 全部闭合；5 项演练回归测试 → 全量 437/437。Phase 0.5 完成（≠ 允许实盘, ≠ 自动进入 Phase 1）。 |
+| 2026-09-20 | M8 | 权益事件登记（I-09 方案1, 用户确认追加）：schema v7 `equity_events`（副本演练 + pre_v7 备份 + 真实库迁移）、拆分感知质检（`registered_equity_events` 参数: 登记命中→info 不阻断; 未登记/比例不符→critical）、`scripts/register_equity_events.py`（产品感知扫描/幂等登记/登记后复核回滚）、真实库登记 12 条（11 条份额折算 + 512690 2021-12-31 开盘缺口证据; 全部推断值待核验）。10 项新测试 → 全量 447/447。效果：全量 critical 12→1（510500 2022-08-29 边界项维持人工核验）；拆分窗口 2→0；daily 干跑正常。**方案2（账户入账）登记至 Phase 1**。 |

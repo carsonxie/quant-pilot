@@ -1,0 +1,60 @@
+# ============================================================
+# config/condition_rules.yaml — Phase 1.1 条件检查规则卡 (P11-M4)
+# ============================================================
+# ⚠️ 研究示例 (RESEARCH EXAMPLE): 阈值未经验证、未经用户确认有效;
+#    与评分规则卡 (config/diagnostics.yaml) 分离版本管理 —— 条件检查单列,
+#    不混入技术分, 不因技术分好坏改变条件结论。
+#
+# 版本: cond-v0.1-research (冻结 2026-09-29, P11-M4)
+# 状态词表 (spec §8.4.6): 未触发 / 关注 / 重点复核 / 无法评估 (+ 不适用/暂缓说明)
+# 数据来源 (P11-M1 实测): Sina 三大报表(含报告期/公告日期) + 财务指标(扣非);
+#   stock_value_em (PE/PB 日频史); fund_overview_em (ETF 资料/费率/规模);
+#   fund_etf_fund_daily_em (净值+折价率快照); fund_etf_category_sina (买卖价快照)。
+# ============================================================
+
+version: "cond-v0.1-research"
+frozen_at: "2026-09-29"
+
+# 单位约定: 内部一律 元 / 比例 (百分数在说明文案中格式化)
+stock:
+  profitability:
+    revenue_yoy_watch: -0.10        # 营收同比 ≤ -10% → 关注
+    revenue_yoy_review: -0.30       # ≤ -30% → 重点复核
+    net_profit_yoy_watch: -0.10
+    net_profit_yoy_review: -0.30
+    net_profit_negative_review: true  # 当期归母净利为负 → 重点复核 (亏损)
+    deducted_negative_watch: true     # 扣非为负 (净利为正时报"利润结构"关注)
+  cashflow:
+    ocf_negative_watch: true          # 经营现金流为负 → 关注
+    ocf_to_profit_watch: 0.5          # 经营现金流/归母净利 < 0.5 → 关注
+    negative_quarters_watch: 2        # 近 4 个单季中 OCF 为负的期数 ≥ 2 → 关注
+  solvency:
+    debt_ratio_watch: 0.70
+    debt_ratio_review: 0.85
+    short_debt_cover_watch: 1.0       # 货币资金/短期有息负债 < 1 → 关注
+    short_debt_cover_review: 0.5      # < 0.5 → 重点复核
+    financial_company_na: true        # 金融企业不套普通工商门槛 → 不适用
+  valuation:
+    pe_percentile_watch: 0.90         # PE-TTM 处于自身历史 ≥90 分位 → 关注
+    pb_percentile_watch: 0.90
+    percentile_min_samples: 250       # 分位窗口最少样本 (约 1 年)
+    percentile_window: 1250           # 分位窗口 ~5 年交易日
+
+etf:
+  product:
+    scale_yi_watch: 5.0               # 净资产规模 < 5 亿元 → 关注
+    scale_yi_review: 2.0              # < 2 亿元 → 重点复核
+    fee_total_watch: 0.006            # 管理费+托管费 > 0.60%/年 → 关注
+    scale_stale_days: 200             # 规模数据 (季度) 超期天数提示
+  liquidity:
+    amount_20d_watch: 30000000       # 近 20 日均成交额 < 3000 万 → 关注
+    amount_20d_review: 5000000       # < 500 万 → 重点复核 (与既有流动性硬线 500 万一致)
+    spread_watch: 0.005              # 快照买卖价差 > 0.5% → 关注 (时点数据, 非日线)
+  premium:
+    watch_abs: 0.03                   # |折溢价| > 3% → 关注 (与既有 3% 候选一致)
+    require_nav_match: true           # 净值缺失/无法匹配 → 无法评估 (不解除既有禁买)
+
+# 暂缓项 (本轮不实现, 显式展示原因, 不伪造)
+deferred:
+  tracking_quality: "暂缓: 缺可比全收益指数数据 (不以价格指数/高相关替代)"
+  underlying_valuation: "暂缓: 缺可靠 ETF→指数估值映射 (黄金/债券不适用 PE)"

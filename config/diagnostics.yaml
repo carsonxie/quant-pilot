@@ -1,0 +1,151 @@
+# ============================================================
+# config/diagnostics.yaml — Phase 1.1 诊断规则卡
+# ============================================================
+# ⚠️ 研究示例 (RESEARCH EXAMPLE): 全部数值未经验证、未经用户确认有效;
+#    冻结版本 diag-v0.1-research (2026-09-28, P11-M3-02)。
+#    修改任何数值必须产生新 rules_version, 不改变本版本含义 (spec §8.4.5)。
+#
+# 依据: spec §8.4.5 (指标与计分契约) / docs/task-phase1.1.md 附录 B
+# 口径: 指标公式与缺失语义见 src/factor_engineering/technical.py 模块 docstring;
+#       本卡只承载"研究示例"参数与计分规则, 不复制公式实现。
+# ============================================================
+
+rules_version: "diag-v0.1-research"
+frozen_at: "2026-09-28"
+explanation_version: "tmpl-v0.1"
+
+# ---- 指标窗口 (传入 factor_engineering.technical.compute_indicators) ----
+indicators:
+  ma_windows: [20, 60, 200]      # SMA; 200 日均线 ≠ 12 个月动量 (独立声明)
+  ma_slope_window: 20            # 均线斜率回看 (交易日)
+  momentum_lookback: 252         # 12-1: 12 个月 ≈ 252 交易日 (显式映射)
+  momentum_skip: 21              # 跳过最近 1 个月 ≈ 21 交易日
+  atr_period: 14                 # Wilder 平滑 (复用已验证实现)
+  vol_window: 20                 # 对数收益样本标准差 (ddof=1)
+  vol_pctile_window: 252         # 波动率历史位置窗口
+  vol_pctile_min_periods: 120    # 不足 → 空 (不虚构)
+  rsi_period: 14                 # Wilder; 双零 → 50 中性
+  boll_window: 20
+  boll_num_std: 2.0              # 总体标准差 (ddof=0, TA-Lib 口径)
+  amount_window: 60              # 量额基准 (shift(1), 此前完整交易日)
+  amount_min_periods: 20
+  atr_ratio_window: 60           # ATR% 相对自身基准
+  atr_ratio_min_periods: 20
+
+# ---- 计分 (风险方向性指标; 全部分组上限与归一化显式) ----
+scoring:
+  items:
+    ma200_dev:
+      column: "ma200_dev"
+      direction: "below_ma"          # (ma - close)/ma 越大分越高
+      full_scale: 0.10               # 低于 MA200 10% → 满分
+      max_points: 20
+      group: "trend"
+      required: true
+    ma200_slope:
+      column: "ma200_slope"
+      direction: "negative_slope"    # 斜率为负按 -斜率/full_scale 计分
+      full_scale: 0.03               # 20 日下滑 3% → 满分
+      max_points: 10
+      group: "trend"
+      required: true
+    momentum_12_1:
+      column: "momentum_12_1"
+      direction: "negative_value"    # 负动量按 -值/full_scale 计分
+      full_scale: 0.20               # ≤ -20% → 满分
+      max_points: 10
+      group: "momentum"
+      required: true
+    vol_pctile:
+      column: "vol_pctile"
+      direction: "above_pivot"       # 高于 pivot 起计
+      pivot: 0.50
+      full_scale: 0.50               # 分位 100% → 满分
+      max_points: 15
+      group: "volatility"
+      required: true
+    atr_pct_ratio:
+      column: "atr_pct_ratio"
+      direction: "above_pivot"       # ATR% 相对 60 日基准
+      pivot: 1.0
+      full_scale: 0.50               # 高出基准 50% → 满分
+      max_points: 10
+      group: "volatility"
+      required: true
+
+  group_caps:                        # 组内贡献上限 (限制同组重复计票)
+    trend: 30
+    momentum: 10
+    volatility: 25
+
+  combined_caps:                     # 组合上限 (趋势与动量高度相关 → 合计折减)
+    - groups: ["trend", "momentum"]
+      cap: 35
+
+  normalization:
+    max_raw: 60                      # = 35 (trend+momentum) + 25 (volatility)
+    formula: "score = min(raw_score, max_raw) / max_raw * 100 (0–100)"
+
+  bands:                             # 版本化分档 (研究示例)
+    normal_max: 30                   # score < 30 → 正常
+    watch_max: 60                    # 30 ≤ score < 60 → 警戒; ≥ 60 → 防御
+
+  hysteresis:                        # 连续触发/恢复条件 (由快照状态机实现)
+    upgrade_confirmations: 2         # 升级需连续 N 个诊断日满足更高档 (含当日)
+    downgrade_confirmations: 1       # 恢复 1 个诊断日即确认
+
+  missing_policy:
+    score_required: "任一计分项缺失 → 总分为空且不出三态 (缺失不视为低风险)"
+    display_optional: "展示项缺失仅标注; 不参与总分、不重分配权重"
+
+# ---- 展示项 (不参与总分; 提示为"关注"语义, 不构成方向判断) ----
+display_items:
+  rsi14:
+    label: "RSI14"
+    overbought: 70                   # ≥70 → 超买区提示 (非卖出建议)
+    oversold: 30                     # ≤30 → 超卖区提示 (非买入建议)
+  boll_pos:
+    label: "布林带位置(0=下轨,1=上轨)"
+    upper_hint: 1.0                  # >1 → 上轨之上
+    lower_hint: 0.0                  # <0 → 下轨之下
+  boll_bw:
+    label: "布林带宽"
+  amt_ratio:
+    label: "量额比(vs 60交易日均值)"
+    high_hint: 2.0                   # ≥2.0 → 异常放量
+    low_hint: 0.5                    # ≤0.5 → 显著缩量
+  atr_pct:
+    label: "ATR14%"
+  ma20:
+    label: "MA20"
+  ma60:
+    label: "MA60"
+  ma200:
+    label: "MA200"
+  momentum_12_1:
+    label: "12-1 动量"
+  boll_mid:
+    label: "布林带中轨"
+  boll_upper:
+    label: "布林带上轨"
+  boll_lower:
+    label: "布林带下轨"
+
+# ---- 权益事件敏感性 (M2-04 暂停规则消费) ----
+# 窗口内存在未核验权益事件 (paused) 或未登记跳变 (data_issue) 时:
+# 以下列标记"暂停/不可评估"并说明原因; 计分项缺失 → 计分为空。
+event_sensitive_columns:
+  - "ma60"
+  - "ma60_dev"
+  - "ma200"
+  - "ma200_dev"
+  - "ma200_slope"
+  - "momentum_12_1"
+  - "vol20"
+  - "vol_pctile"
+  - "atr_pct_ratio"
+  - "boll_mid"
+  - "boll_upper"
+  - "boll_lower"
+  - "boll_pos"
+  - "boll_bw"

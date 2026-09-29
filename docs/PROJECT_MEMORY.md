@@ -11,11 +11,11 @@
 | 字段                   | 值                                                                  |
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
-| **当前 Phase**   | Phase 0.5 — **M5 完成**（B0/B1 基准 + 共用执行基础）→ M6 待启动 |
-| **当前 Task**    | `docs/task-phase0.5.md`（M1 ✅；M2 ✅；M3 ✅；M4 ✅；M5 ✅；M6 待启动） |
+| **当前 Phase**   | Phase 0.5 + M8 ✅ → **Phase 1.1 ✅ 完成（P11-M0–M6, 2026-09-29）** —— 单标的诊断页面可用；下一步 **Phase 1 研究（P1-R1–R6，未开始）** |
+| **当前 Task**    | `docs/task-phase1.1.md`（P11-M0–M6 全 ✅；§11 验收与交接报告）；Phase 1 研究任务独立登记于其 §6（P1-R1–R6, 全部未开始） |
 | **Phase 进度**   | Phase 0 代码 T0.1~T0.10 ✅ / §8.1 收尾补项 6 组 ✅（A0-1…A0-6 全部闭合；推送失败持久化转 M2） |
-| **Gate 状态**    | 旧口径 6/6 ✅；spec §8.7 三 Gate 体系下 Phase 0 收尾证据已闭合（`docs/phase0.5-audit.md` §1 全绿）                                 |
-| **最后更新**     | 2026-09-15 (M5 完成: B0/B1 基准/实验记录/同口径, 411/411 测试, M6 待启动) |
+| **Gate 状态**    | 工程 Gate + P05-D1–D8 ✅（审计 §5）; **真实账户启用 Gate 未触发**（需用户明确启用, spec §8.7） |
+| **最后更新**     | 2026-09-29 (Phase 1.1 P11-M6 完成 → 阶段收官: 验收对照+在线演示+回归 663/663; 交接见 HANDOFF.md) |
 
 ---
 
@@ -374,6 +374,157 @@
 - **已知限制**: 真实数据含未调整拆分跳变（I-09）→ 拆分年（如 2022）可能触发非策略性再平衡, 报告须标注干扰；B0/B1 按不复权口径比较（CALIBER_NOTE）
 - **后续动作**: **M6**（基础绩效/入金不计收益/贡献闭合、实验记录补全、面板扩展与净值对照）
 
+### EV-025 — M6: 基础绩效、实验追踪补全与面板扩展 🟡
+
+- **日期**: 2026-09-15
+- **类型**: M6 里程碑（绩效与展示）/ schema 迁移
+- **描述**: M6 交付:
+  - **`backtest/performance.py`**: `compute_performance` — 事件驱动逐日估值; **金额核对**: 期末 − 调整起点 − 净外部入金 = 投资盈亏; 分项 持仓/现金贡献、分红、费用单列, 未解释差额显式（应为 0）。调整起点约定: 起点日收盘权益 + 当日费用 − 当日分红（起点日资本不进收益区间, 当日费/红利计入期间且不重复）。**入金/出金不计收益**; 分红计收益; 费用只以 fee 事件进入现金（参考价滑点不二次扣）。TWR 日频链接（现金流按日终估值点近似, `CASHFLOW_TIMING_NOTE` 随报告）。`performance_for_account`（账户路径）、`load_nav_series`（逐日净值）、`compare_accounts`（多账户独立对照, 首日=100）
+  - **schema v6**: experiments 增列 `mode/started_at/finished_at/error`（副本演练 + 真实库迁移, counts 不变）; 基准 runner 写模式与起止时间; **失败试验留痕**（status=failed + 错误摘要, 不删除）
+  - **面板扩展（C21 只读连接）**: `dashboard/data_loader` 新增 `load_account_summaries` / `build_nav_comparison` / `build_actual_vs_target` / `load_pending_proposals` / `load_latest_run`; 全部读取改用 `read_only=True` 连接（不写库, mtime 不变测试）; `app.py` 新增 实际 vs 目标、待处理建议与反馈、净值对照（B0/B1/A 独立）、运行状态/推送/失败提醒
+- **验证**: 21 项新测试（绩效 14: 闭合/入金/出金/分红/费用/缺口/多账户/与 B0 联动独立期望; 基准失败留痕 1; 面板 6）→ 全量 **432/432**; ruff 新文件零告警; 真实数据副本干跑: B0 期末 204,721.94（+104.72%, unexplained 0）、B1 期末 202,157.43（+102.16%, unexplained 0）, 与 M5 模拟器一致; 面板摘要与净值对照（1,868 行）正常
+- **影响范围**: performance.py（新）, baseline_runner（失败留痕/模式/起止）, duckdb_manager（v6/experiments 列）, dashboard（data_loader/app）, tests; audit C21/P05-D6/D7/D8
+- **已知限制**: TWR 为日频近似（现金时点=日终）, 只有更细现金流时间才可精确; 估值缺口存在时金额核对不可用（显式提示）
+- **后续动作**: **M7**（迁移/重跑/恢复演练、关键场景证据、对照 P05-D1–D8 验收、README 与交接收尾）
+
+### EV-026 — M7: 隔离副本演练、集成验收与 Phase 0.5 收官 🎉🔴
+
+- **日期**: 2026-09-15
+- **类型**: M7 里程碑（迁移演练/验收/交接）/ Phase 0.5 完成
+- **描述**: M7 交付:
+  - **隔离副本演练** `scripts/rehearsal_m7.py`（报告 `data/backups/rehearsal_m7_report.json`, ALL_OK=True）:
+    ① **迁移幂等**（副本重复 `init_database` 两次; counts/signals 逐项不变; versions=[1..6]）
+    ② **半笔事件保护**（卖超 → `AccountError`; 事件表与回放状态零变化）
+    ③ **重跑幂等**（同事件集二次导入 0 新增/全部去重）
+    ④ **恢复路径**（备份 → 新事件 → 恢复 → 重放新事件 → 现金/份额与事件指纹一致; plan §5.8: 切换后新真实事件必须重放核对, 不能简单丢弃）
+    回归测试 `tests/test_rehearsal.py` 5 例（临时目录, 不触碰真实库）
+  - **关键场景证据**: `docs/phase0.5-audit.md` §5 — plan §6 十三条 + spec §8.2 十样本案例逐项证据（测试名/命令/记录）; **P05-D1–D8 全部闭合**（§5.3）; 引用测试名/类名经 grep 全量存在性复核
+  - **文档**: README 重写为实际运行/导入方式（命令表/账户录入/基准与绩效口径/数据问题与安全边界）; task/审计/记忆/HANDOFF 收尾
+  - **已知限制与恢复路径**（HANDOFF 专节）: I-02/I-03/I-09 与登记项（C02/C16/C17/C22/C23 → P1/P1.5）、恢复方法（备份恢复 + 事件重放核对）、操作约束（单写进程/勿全量 fetch-data 绕过阻断）
+- **验证**: 全量 **437/437** 通过（M7 新增 5 项）; 真实库 schema v6 保持（0 账户/0 建议, 研究状态）; 演练报告 ALL_OK=True
+- **影响范围**: scripts/rehearsal_m7.py（新）, tests/test_rehearsal.py（新）, README, docs（task/审计/记忆/HANDOFF）
+- **收尾结论**: **Phase 0.5 完成**（工程 Gate + P05 验收齐全）; **≠ 允许实盘、≠ 自动进入 Phase 1**; 真实账户启用 Gate 未触发; 下一步 Phase 1 工单由用户确认后再拆解（少量候选因子验证; 前置 I-02 Python 版本决策）
+- **后续动作**: P1（先解决 I-02: `uv python pin 3.12` 或隔离环境; 再拆少量因子/模块对照任务）
+
+### EV-027 — M8: 权益事件登记与拆分感知质检（I-09 方案1）🟡
+
+- **日期**: 2026-09-20
+- **类型**: 用户确认追加批次（数据质量问题处置）/ schema 迁移
+- **背景**: `uv run fetch-data` 全量质检报出 13 条 critical（未调整权益事件跳变, I-09）; 用户要求实施"方案1"（登记 + 拆分感知质检, 不修改价格数据）; **方案2（权益事件入账）归入 Phase 1**（用户确认, task §10）。
+- **描述**: M8 交付:
+  - **schema v7 `equity_events`**: symbol/event_date/event_type/ratio/ratio_semantics(price_factor: 后一收盘 ≈ 前一收盘 / ratio)/source/inferred/verified/method/note; 副本演练（`rehearsal_v7`）+ pre_v7 备份 + 真实库迁移（counts 不变, 幂等）
+  - **拆分感知质检**: `validate_ohlcv(registered_equity_events=...)` — 命中登记日期且比例一致（|实际−期望| ≤ 2pp 或 5%×期望）→ `registered_equity_event`（info, 不阻断）; 未登记 → 维持 critical; **比例不符 → critical**（防"洗白"二次修订）; daily 与 fetch-data 两条路径均接入
+  - **登记脚本** `scripts/register_equity_events.py`: 产品感知扫描（20% 板 ±20% 不误报）、`--check`/`--apply`/`--auto`、幂等登记、**登记后自动复核（同一标的残余 critical → 事务回滚）**
+  - **真实库登记 12 条**（全部 `inferred=True, verified=False` 推断值待核验）: 159928/512010/512690×2/512480×2/513100/513500/159941/516160/159995/512100; 其中 512690 2021-12-31 由"前收 1.323 → 当日开盘 0.976, 缺口全部在开盘且成交量正常"判定为份额折算（非数据错误）; 510500 2022-08-29（−12.74%, 幅度小）不登记, 维持人工核验
+- **验证**: 10 项新测试（拆分感知 7 + 持久化 2 + 脚本 2 净计）→ 全量 **447/447**; ruff 新文件零告警; 效果: 全量 critical 12→**1**（仅 510500 边界项）、拆分窗口（2026-07-03/07-07）2→**0 critical + 2 info**、daily 干跑（副本, 数据至 2026-09-18）正常完成
+- **影响范围**: duckdb_manager（v7/equity_events CRUD）, validator（registered_equity_events）, daily_pipeline/fetch-data（登记表接入）, scripts/register_equity_events.py（新）, tests/test_equity_events.py（新）; README/审计/HANDOFF
+- **已知限制**: 登记比例为价格反推推断值, 待官方数据/人工核验升级（`verified` 标记）; 512100 因子偏大待优先核验; **方案2（账户入账, 真实持仓前必须完成）在 Phase 1**
+- **后续动作**: Phase 1（用户确认后; 含 I-09 方案2、I-02 版本决策）
+
+### EV-028 — Phase 1.1 启动：任务清单、用户确认与 P11-M0 完成 🟡
+
+- **日期**: 2026-09-26
+- **类型**: 阶段启动 / 任务初始化（用户确认后执行）
+- **与 task.md 关系**: 互补（spec v3.1 §8.4 新增 Phase 1.1；task.md 原路线无此阶段）
+- **描述**: Phase 1.1（单标的探索、观察名单与规则诊断）启动:
+  - **基线核对（实测）**: 全量 **447/447** 通过（31.6s）; schema v7; 19 ETFs / 34,168 行（2019-01-02→2026-09-18）; 0 账户/建议/实验; M6–M8 未提交改动保留未丢弃
+  - **环境核实**: Python 3.14.3; akshare 1.18.64; streamlit 1.59.2; altair 6.2.2 已装; **plotly 未装**（p1 可选组, dry-run 可装 7.1.0）; `scripts/validate_registry.py` 缺失（factor-check 入口悬空, 登记归 P1-R2）
+  - **产出 `docs/task-phase1.1.md`**（40 项任务, P11-M0–M6）: §1 差异核对（可复用/待补/限制）; §5 设计决策 D1–D8（plotly 选型; 非池行情独立表 `diag_price_daily`; 身份缓存独立表 `securities`; 诊断指标注册于 factor_registry 新段; 快照 JSON 列; 刷新复用 validator 不绕过质检; 未核验权益事件→跨事件指标暂停; schema v8 五表草案）; §6 Phase 1 研究任务独立登记（P1-R1–R6, 不被本阶段验收）; §7 v8 表结构草案; §8 P11-A1–A10 映射; 附录 A 接口调查模板 / 附录 B 规则卡草案
+  - **用户确认**（2026-09-26）: 任务清单无调整, 指示实施 M0
+  - **P11-M0-02 文档残留修正**: `task-phase0.5.md` L106 M2 标题（"M2b 待启动" → "✅ 完成 2026-09-14, M2a+M2b"）; L278 入金样本行（"未实现（M6）" → "✅ M6 完成（零收益+入金 → 收益率 0; `test_zero_price_return_deposit_does_not_raise_return`）"）; diff 仅此两处
+- **影响范围**: `docs/task-phase1.1.md`（新增, 后续 P11 实施以此为准）; `docs/task-phase0.5.md`（两行状态残留修正, 不改变历史事实）; Phase 1 研究仍独立（phase1_kickoff.md / P1-R1–R6, 不因 P11 完成注销）
+- **后续动作**: **P11-M1 接口实测**（核心行情/身份/日历/财务/估值/ETF 扩展字段, 先行批次; 结论固化附录 A: 可用/部分/暂缓）→ M2 schema v8 → M3 指标/计分 → M5 页面 → M6 验收
+
+### EV-029 — P11-M1：36 项接口实测与能力表固化 🔴
+
+- **日期**: 2026-09-28
+- **类型**: 先行批次完成 / 接口能力调查（决定后续实现范围）
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段; task.md 无此阶段）
+- **描述**: P11-M1 完成（3 轮真实调用共 36 项, 探针 `scripts/probe_phase11_interfaces.py`, 原始输出 `data/backups/probe_phase11_20260928_*.json`）:
+  - **可用（进入实现）**: ETF 日线 `fund_etf_hist_sina`（510300/513100, 最新 09-28, 0.3–0.6s）; 股票日线 `stock_zh_a_daily`（600519 raw/qfq 6013 行, 688981 短历史, 含 outstanding_share/turnover）; 身份 `stock_info_a_code_name`（5569, 含北交所）+ `fund_etf_category_sina`（1687）+ `fund_name_em`（27991 辅助）; 日历 `tool_trade_date_hist_sina`（8797 行 1990→2026-12-31）; 财务 `stock_financial_report_sina` 三大报表（**含报告日/公告日期/币种/是否审计**; 金融企业结构不同）+ `stock_financial_analysis_indicator`（86 列）; 估值 `stock_value_em`（日频 13 列 PE/PB/市值, 2018 起）主 + `stock_zh_valuation_baidu`（近一年）备; ETF 资料/费率/规模 `fund_overview_em`（管理费 0.15%/托管费 0.05%/净资产规模/跟踪标的）; 净值历史 `fund_open_fund_info_em`（510300 3502 行）; 折溢价快照 `fund_etf_fund_daily_em`（1669 行含折价率）; 深市份额 `fund_etf_scale_szse`
+  - **部分可用 + 降级**: 东财备用路径偶发断连（RemoteDisconnected/ProxyError, 1–2 次实测失败）→ 备用源 + 退避重试; 沪市份额 `fund_etf_scale_sse` 近期日期失败（仅历史期可用, 默认 2025-01-15）; 折溢价跨境当日净值可能缺失（513100 实测 `---`）→ **日期/币种不匹配一律 unknown, 不解除既有禁买**; `stock_individual_info_em` 不作唯一依赖
+  - **暂缓（明确记录, 不阻塞核心交付）**: ETF 跟踪质量（缺可比全收益指数, 不以价格指数/高相关替代）; ETF 底层估值映射（缺可靠映射, 黄金/债券不适用）; 雪球资料接口（本环境 KeyError）; `fund_fee_em` 空表（费率以 `fund_overview_em` 为准）
+  - **接口故障登记**: `fund_etf_fund_info_em` ValueError（本版本损坏→用替代）; `stock_a_indicator_lg` 不存在（→ `stock_value_em`）; 错误代码行为（ETF 空表 / 股票 `KeyError('date')` → 服务层归一）
+  - **口径细节**: Sina 财务值为字符串且缺失为 `'None'` 文本（需转换）; 股票 qfq 为"当前复权"口径（修订需重建, 归属 M2-04）; 财务公告日期可支撑披露期展示（历史 PIT 需快照版本化, 登记）
+- **影响范围**: `docs/task-phase1.1.md`（M1 任务完成 + 附录 A 实测能力表 + §5.2 Q1–Q3 关闭 + M2-03/M4 接口选型）; `scripts/probe_phase11_interfaces.py`（新, evidence 工具）; 后续 M2/M4 实现按能力表范围执行, 暂缓项不隐藏不编造
+- **后续动作**: **P11-M2**（schema v8 五表迁移 + 身份解析 + 统一取数 + 权益事件价格处理）→ M3 指标/规则卡/快照 → M5 页面 → M6 验收
+
+### EV-030 — P11-M2：schema v8、身份解析与统一取数服务 🔴
+
+- **日期**: 2026-09-28
+- **类型**: 阶段批次完成（存储迁移 + 服务层）/ schema 迁移 / settings 参数变更
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段）
+- **描述**: P11-M2 完成:
+  - **schema v8（五表）**: `securities`（身份缓存）/ `watchlist` + `watchlist_changes`（观察名单与变更记录, 软删除）/ `diag_price_daily`（非池标的研究行情缓存）/ `diagnostic_snapshots`（诊断快照, 确定性 ID `symbol|as_of|rules|price` + UNIQUE）。迁移按 plan §5: 备份 `quant_pilot_20260928_pre_v8.duckdb` → 副本演练（`scripts/rehearsal_v8.py`, 23 张既有表 counts 稳定）→ 真实库应用（versions [1..8], counts 稳定, `apply.ok=true`）→ `schema_migration_log` 留痕
+  - **`src/data_pipeline/securities.py`**: 代码规范化/交易所与类型前缀推断（候选, 权威以名录为准）/ `SecurityResolver.resolve|search` / 名录缓存（股票全表 + ETF 列表, TTL 内不重复联网; 未命中且过期时一次强制重载）/ `resolver_from_settings`; 未知代码 → `UnknownSymbolError`（不猜测）
+  - **`src/data_pipeline/diag_data.py`**: `ensure_research_prices(refresh=none/auto/force)` — 池内 ETF 读写 `ohlcv_daily`（含出池旧持仓: ohlcv 有历史即池内路径）; 非池标的读写 `diag_price_daily`（**股票 hfq 全量替换**避免前复权拼接污染, 设计修正记录于任务文件; ETF 不复权增量 UPSERT）; 超时/退避重试（KeyError 已知失败不重试）/ 新鲜度优先 / 失败保留旧数据（stale/failed + notes）; **validator 质检门**（权益事件感知, critical 阻断不写入）; 交易日历（sina + 池内并集回退）+ `last_completed_trading_day`（cutoff 18:30 可配）; `check_equity_events`（ok/paused/data_issue/not_applicable + 已核验事件调整序列, 仅调 OHLC）
+  - **settings.yaml 变更（原因: P11-M2 诊断数据参数, 非交易参数）**: 新增 `diagnostics` 节 — min_history_days=320 / refetch_buffer_days=10 / fetch_timeout_seconds=30 / fetch_retries=3 / fetch_backoff_base=2.0 / session_close_cutoff=18:30 / securities_cache_ttl_days=30
+  - **验证**: 新增 71 项测试（test_diag_storage 18 / test_securities 17 / test_diag_data 36）→ 全量 **518/518**; 真实副本冒烟（`rehearsal_m2.duckdb`）: 600519 hfq updated 6013 行; 513100（池内跨境）increment 至 2026-09-28 且 `paused`（1 条未核验事件）; 交易表零变化（accounts/trade_proposals 0→0, universe_members 19→19）
+  - **既有测试适配**: 3 处硬编码 schema 版本断言改为 `range(1, SCHEMA_VERSION+1)`（test_duckdb_manager ×2, test_rehearsal ×1）
+- **影响范围**: `src/data_pipeline/securities.py`、`src/data_pipeline/diag_data.py`（新）; `duckdb_manager.py`（v8 DDL/迁移/CRUD）; `config/settings.yaml`（diagnostics 节）; `scripts/rehearsal_v8.py`（新）; 3 个测试文件; 后续 M3/M5 直接复用本服务层
+- **后续动作**: **P11-M3**（指标函数库 → 规则卡冻结 → 计分/三态 → 解释模板 → 快照读写 → `diagnosis_service` 统一入口）→ M4/M5 → M6 验收
+
+### EV-031 — P11-M3：指标库、冻结规则卡、计分/快照与统一诊断服务 🔴
+
+- **日期**: 2026-09-29
+- **类型**: 阶段批次完成（研究示例规则冻结 + 诊断服务）/ 设计修正
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段）
+- **描述**: P11-M3 完成:
+  - **指标库 `src/factor_engineering/technical.py`**: MA/偏离/斜率、12-1 精确端点区间动量、ATR/ATR%（复用 `RiskManager.calc_atr_series`）、20 日对数收益波动率（ddof=1）+ 经验分位、RSI（Wilder；零涨→100/零跌→0/双零→50）、布林带（总体标准差 ddof=0; 带宽 0 → 位置空值）、量额活跃度与 ATR% 相对基准（基准 shift(1)）; `compute_indicators(params)` + `indicator_columns(params)`（窗口不硬编码）
+  - **规则卡冻结 `config/diagnostics.yaml`**（rules_version=**diag-v0.1-research**, 冻结于 2026-09-28, 编写后未再修改）: 计分项全为必需（缺失→总分为空, 缺失不视为低风险）; 组上限 trend 30 / momentum 10 / volatility 25; 组合上限 trend+momentum=35（比例折减保持项级可追溯）; 归一化 `score=min(raw,60)/60×100`; 分档 <30 正常 / 30–60 警戒 / ≥60 防御; 升级需连续 2 运行日、恢复 1 日; 展示项（RSI/布林位置/量额比等）不参与总分（不强行方向预测）; 事件敏感列清单
+  - **注册**: `config/factor_registry.yaml` 新增 `diagnostic_indicators:`（D01–D12; 含公式/口径/单位/窗口/最低样本/缺失策略/用途/代码入口; 与 `factors:` 段分离, 不参与 IC 评估）; 一致性测试保证条目可导入可调用
+  - **计分与解释 `src/strategies/diagnosis.py`**: `assess_row` 分项→贡献→组/组合上限→归一化→原始三态; 解释模板 tmpl-v0.1（当前值→比较/规则→结论→贡献→数据日期/来源; 无 LLM）; 展示项提示为"关注"语义
+  - **快照状态机 + 统一服务 `src/orchestration/diagnosis_service.py`**: `run_diagnosis` 单入口（身份→取数→权益事件→指标→计分→状态机→快照）; trigger 全词表（初始/升级待确认/新增警戒/新增防御/恢复/维持/版本变化/数据失效/不可评估）; 同日重跑与更早运行日比较（不与自己对话, trigger 稳定）; payload/history/列表读取接口
+  - **设计修正（记录理由）**: `price_version` 由 `源|口径|最后日期` → `源|口径` — 原含日期导致每个新交易日被状态机误判"版本变化"; 诊断日期由快照 `as_of` 承载（唯一键含 as_of, 幂等不受影响）
+  - **验证**: 新增 66 项测试（technical 29 / diagnosis 23 / diagnosis_service 14）→ 全量 **584/584**; 真实数据副本端到端（`rehearsal_m3.duckdb`, 数据至 2026-09-29）: 600519 → 评分 37.7 **警戒**（5/5 完整, trend 17.16/momentum 5.45）; 510300 → 23.9 **正常**（RSI 29.9 超卖提示/布林下轨/缩量提示）; 513100 → 事件暂停 **不可评估**（score=None）; 同日重跑 snapshots 3→3; 交易表零变化
+- **影响范围**: `src/factor_engineering/technical.py`、`src/strategies/diagnosis.py`、`src/orchestration/diagnosis_service.py`（新）; `config/diagnostics.yaml`（新, 冻结）、`config/factor_registry.yaml`（注册段）; `diag_data.py`（price_version 修正）; 4 个测试文件（含 test_diag_data 更新）; M5 页面直接消费 `run_diagnosis`/payload
+- **后续动作**: **P11-M4/M5**（条件检查按 M1 能力表; 三入口+K线+刷新）→ M6 验收; 规则卡如需调数值 → 新 `rules_version`（当前冻结版本不再修改）
+
+### EV-032 — P11-M5：三入口诊断页面、观察名单与六个月 K 线 🎉版本级
+
+- **日期**: 2026-09-29
+- **类型**: 阶段批次完成（用户可见功能交付）/ 依赖变更（plotly 入主依赖）
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段）
+- **描述**: P11-M5 完成（单标的诊断页面可用）:
+  - **依赖**: `uv add plotly`（6.9.0 入主依赖; p1 组同步移除重复声明; D1 决策落地）; user_guide/README 增"单标的诊断"使用说明
+  - **数据层 `dashboard/diagnostics_data.py`（只读, 可单测）**: `months_before`（月末截断）; `read_symbol_prices`（池内优先/非池回退）; `build_kline_frame`（**全历史计算 MA/布林后裁剪近 6 个自然月**, 显示与计算分离）; `load_holdings`（账户事件回放 + 最近可用价估值 + 实际权重; 无账户不生成伪持仓）; `load_watchlist_rows`; `load_snapshot_details`（最近/次近）; `build_list_rows`（排序 防御>警戒>不可评估>正常>未评估; 较上次变化; 原因优先级 缺项>提示>状态）
+  - **渲染层 `dashboard/diagnostics_app.py`**: 我的持仓/观察名单/探索 三视角 → 详情（评分卡/问题清单/Plotly 蜡烛图+量额副图+MA/Boll 开关/指标与贡献/模板解释）; **自动更新冷却**（打开先读快照, 缺失或落后于最近已完成交易日时受控 auto 更新, 会话内 300s 去抖; 手动刷新走 force）; 失败保留旧结果并提示; 名单变更/诊断运行经 `DuckDBManager` 受控写入口
+  - **双模块入口 `dashboard/app.py`**: 侧边栏"账户与信号（默认, 原逻辑拆为 `render_account_panel`）/ 单标的诊断（懒加载）"
+  - **名单服务**: `diagnosis_service.watchlist_add/remove/update_note`（身份快照/幂等/软删除/不写策略池）
+  - **验证**: 新增 27 测试（数据层 16 / UI-AppTest 7 含快照驱动详情渲染 / 名单服务 4）→ 全量 **611/611**; UI 数据链路冒烟（`rehearsal_m5.duckdb`）: 观察名单增/幂等/移除; 510300 → 23.9 正常, 513100 → 不可评估 且排序在前; K 线全史 1879 → 显示 126 行且首行 MA200 已预热; headless 启动 `_stcore/health=ok`、首页 200; 交易表零变化
+  - **未实施（登记）**: P11-M5-08 外部诊断推送（默认关闭, 接线点=trigger 变化 + 既有 notifier 通道）
+- **影响范围**: `dashboard/diagnostics_data.py`、`dashboard/diagnostics_app.py`（新）; `dashboard/app.py`（双模块）; `diagnosis_service.py`（名单服务）; `pyproject.toml`/`uv.lock`（plotly）; `docs/user_guide.md`、`README.md`; 3 个测试文件
+- **后续动作**: **P11-M4**（股票财务/估值 + ETF 资料费率检查, 按 M1 能力表; 跟踪质量/底层估值映射维持暂缓）→ **P11-M6**（P11-A1–A10 验收对照、在线演示、交接报告、文档同步）
+
+### EV-033 — P11-M4：条件基本面与 ETF 产品检查 🔴
+
+- **日期**: 2026-09-29
+- **类型**: 阶段批次完成（条件检查）/ 接口加固 / bug 修复
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段）
+- **描述**: P11-M4 完成（按 M1 能力表"可用→实现；暂缓→登记"）:
+  - **数据层 `src/data_pipeline/fundamental_data.py`**: 股票三大报表 + 财务指标(扣非) + `stock_value_em` 估值 → 按报告期合并的紧凑 extract（公告日期/币种保留; 'None'/NaN → None）; ETF `fund_overview_em` 资料/费率/规模解析（"948.72亿元（截止至：…）" 形式）+ `fund_etf_fund_daily_em` 净值/折价 + `fund_etf_category_sina` 买卖价快照解析; 全表快照进程内 TTL 缓存 1h
+  - **规则卡 `config/condition_rules.yaml`**（cond-v0.1-research, 冻结 2026-09-29, 与评分卡分离版本）
+  - **规则层 `src/strategies/condition_checks.py`**: 状态词表 未触发/关注/重点复核/无法评估/不适用; 股票 9 项（营收/归母/扣非 TTM、现金流质量与多期、负债率 70%/85%、短期偿债覆盖（短期借款+一年内到期近似）、净资产、PE/PB 及自身 5 年分位）; ETF 8 项（资料/规模/费率/成交额/快照价差/折溢价/跟踪质量暂缓/底层估值暂缓）; 纪律: 基期非正不给增长率、亏损 PE"不解释为便宜"、金融企业（收入表含"净利息收入"识别）偿债不适用、折溢价缺净值 unknown 且注明不解除禁买
+  - **服务/UI 接入**: `run_diagnosis` 组装 `checks.conditions` 入快照（失败不阻塞技术诊断——测试覆盖）; 详情页新增"条件检查"表格（与技术分单列）+ 暂缓项显式展示
+  - **接口加固（实测驱动）**: `stock_info_a_code_name` 依赖深交所站点（实测 `www.szse.cn` ConnectTimeout）→ 新增 `stock_zh_a_spot`（新浪全量快照, 含北交所）兜底; `_load_one` 名录失败归一 `SecurityFetchError`（不再泄漏原始堆栈）; 修复 `parse_float` pandas NaN/Inf 泄漏（实测 SV-02 从 "nan 亿 = nan" 修正为"0.57 亿, 覆盖 941 倍"）
+  - **验证**: 新增 51 测试（解析 18 / 规则 28 / 服务 3 / securities 兜底净增 3 减去调整）→ 全量 **662/662**; 真实数据副本冒烟（`rehearsal_m4.duckdb`）: 600519 十项全未触发（营收 922.78 亿 +1.3%、归母 445.17 亿 -2.0%、TTM 814.34 亿/扣非 813.67 亿、OCF/净利 1.59、负债率 15.2%、PE 18.97 分位 2%）; 510300 六项未触发（跟踪沪深300/规模 948.72 亿/费率 0.20%/日均成交 31.72 亿/折溢价 +0.05%）; **513100 → 费率 0.80% 关注 + 折溢价无法评估**（跨境当日净值缺失, 不解除禁买）; 交易表零变化
+- **影响范围**: `fundamental_data.py`、`condition_checks.py`（新）; `config/condition_rules.yaml`（新, 冻结）; `securities.py`（名录兜底/错误归一）; `diagnosis_service.py`（conditions 装配）; `dashboard/diagnostics_app.py`（条件检查区块）; `docs/user_guide.md`; 4 个测试文件
+- **后续动作**: **P11-M6**（P11-A1–A10 验收对照、在线端到端演示、交接报告、文档同步; 不做新功能扩展）
+
+### EV-034 — P11-M6 验收交接 → **Phase 1.1 收官** 🎉🔴
+
+- **日期**: 2026-09-29
+- **类型**: 阶段批次完成（验收/交接）/ Phase 里程碑 / bug 修复
+- **与 task.md 关系**: 互补（Phase 1.1 新增阶段收官）
+- **描述**: P11-M6 完成，Phase 1.1（P11-M0–M6）全部收官:
+  - **验收对照（P11-A1–A10）**: 全部 ✅（task-phase1.1 §11.1, 逐项引用测试名/命令/运行记录; 无受阻项）
+  - **在线端到端演示（真实库, 6 类样本; 证据 `data/backups/m6_e2e_demo_20260929_2246.json`）**: 510300 完整 ETF（23.9 正常, 条件未触发 6）; 513100 跨境（事件暂停不可评估, 折溢价 unknown 不解除禁买）; 301696 短历史股票 118 根（不可评估 1/5, 不伪造）; 600519（37.7 警戒）; 601398 银行（0.0 正常; 偿债不适用; PE 分位 98% 关注）; 999999 错误代码（明确报错）。观察名单加入→再次打开可见; 交易表零变化。耗时：冷启动≈45.7s（含 szse 超时→sina 兜底 ≈20s）/热缓存 0.3–4.7s
+  - **回归（P11-M6-02）**: 全量 **663/663**; `rehearsal_m7.py` 在 v8 库上 ALL_OK（迁移 versions[1..8]/回滚/重跑/恢复）; `uv run backtest` 偏差 0.043%/0.031% + T+0/T+1 交收差一天
+  - **修复**: 银行权益字段名差异（"归属于母公司股东的权益" 回退; 601398 SV-03 恢复"未触发"并刷新真实快照）; 观察名单空态测试改为隔离临时库（不再依赖真实库可变状态）
+  - **文档同步**: `task-phase1.1.md`（M6 状态 + **§11 验收与交接报告**）; `HANDOFF.md`（重写为 Phase 1.1 收官交接）; `README.md`（663）; `user_guide.md`（此前已更新）; AGENTS 评估=无需修订（§11.8）
+- **影响范围**: `docs/task-phase1.1.md`、`HANDOFF.md`、`README.md`、`docs/PROJECT_MEMORY.md`; `fundamental_data.py`（银行字段）; `tests/test_fundamental_data.py`、`tests/test_diagnostics_app.py`; 真实库新增演示数据（5 快照 / 2 观察 / securities 缓存）
+- **后续动作**: **Phase 1 研究（P1-R1–R6, 全部未开始, 需用户确认）**: 先 P1-R1（I-09 方案2 权益入账 + A 回测风控对齐）→ P1-R2/R3 因子与 RankIC/ICIR → R4/R5 → R6（先做 I-02 决策）。Phase 1.1 完成 ≠ 实盘授权（真实账户启用 Gate 未触发）
+
 ---
 
 ## 四、关键产出索引
@@ -412,6 +563,23 @@
 | 调仓规划器 (目标→建议)               | `src/strategies/rebalance_planner.py`           | M4    | ✅ 🆕                        |
 | 持有期状态 (高水位/棘轮/冷却)        | `src/strategies/strategy_states.py`             | M4    | ✅ 🆕                        |
 | 调仓编排 (账户→状态→建议落库)        | `src/orchestration/rebalance_run.py`            | M4    | ✅ 🆕                        |
+| Phase 1.1 任务/接口调查/验收证据      | `docs/task-phase1.1.md`                         | P1.1  | [~] M0/M1/M2 ✅, M3 待启动    |
+| 接口探针 (可复跑, 分组)               | `scripts/probe_phase11_interfaces.py`           | P1.1  | ✅ M1 证据                    |
+| 证券身份解析 (名录缓存/搜索)          | `src/data_pipeline/securities.py`               | P1.1  | ✅ M2                         |
+| 诊断统一取数 (日历/缓存/事件检查)     | `src/data_pipeline/diag_data.py`                | P1.1  | ✅ M2                         |
+| schema v8 迁移演练脚本                | `scripts/rehearsal_v8.py`                       | P1.1  | ✅ M2 证据                    |
+| 诊断指标库 (MA/动量/ATR/RSI/布林/量额) | `src/factor_engineering/technical.py`          | P1.1  | ✅ M3                         |
+| 诊断规则卡 (研究示例, 冻结)           | `config/diagnostics.yaml`                       | P1.1  | ✅ M3 diag-v0.1-research      |
+| 计分引擎与解释模板 (无 LLM)           | `src/strategies/diagnosis.py`                   | P1.1  | ✅ M3                         |
+| 统一诊断服务 (状态机/快照)            | `src/orchestration/diagnosis_service.py`        | P1.1  | ✅ M3                         |
+| 诊断页面数据层 (K线/列表/持仓)        | `dashboard/diagnostics_data.py`                 | P1.1  | ✅ M5                         |
+| 诊断页面渲染 (三入口/详情/K线图)      | `dashboard/diagnostics_app.py`                  | P1.1  | ✅ M5                         |
+| 双模块面板入口                        | `dashboard/app.py`（账户与信号 + 单标的诊断） | P1.1  | ✅ M5                         |
+| 基本面/ETF 条件数据层                 | `src/data_pipeline/fundamental_data.py`         | P1.1  | ✅ M4                         |
+| 条件检查规则层                        | `src/strategies/condition_checks.py`            | P1.1  | ✅ M4                         |
+| 条件检查规则卡 (研究示例, 冻结)       | `config/condition_rules.yaml`                   | P1.1  | ✅ M4 cond-v0.1-research      |
+| Phase 1.1 验收与交接报告              | `docs/task-phase1.1.md` §11                     | P1.1  | ✅ M6                         |
+| 会话交接 (Phase 1.1 收官)             | `HANDOFF.md`                                    | P1.1  | ✅ M6 重写                    |
 
 ---
 
@@ -427,7 +595,7 @@
 | I-06 | spec v3.0 §9 审计 A 类: C01/C04/C08 (M1-1) + C05/C06/C09/C10/C11 (M1-2) ✅ 全部修正; C03 部分 (M1-3) ✅ | 2026-09-14 | M1 完成, 280/280 | 无 (完整四类记录/池/再平衡随 M2–M6) |
 | I-07 | ~~AGENTS.md §5.2/§7 旧条款与 spec v3.0 冲突~~ → ✅ **已修订至 v3.0**（用户 2026-09-14 确认） | 2026-09-14 | M1-3 完成 | 无 |
 | I-08 | ~~固定 \|涨跌\|>20% 阈值可能误伤 20% 板真实极端日~~ → ✅ 已解决 (M1-2 产品感知分级: 10%/20% 板 + 2pp 容差) | 2026-09-14 | M1-2-01 完成 | 无 |
-| I-09 | 历史行情含未调整权益事件跳变 (拆分/折算 10+ 处, 见 EV-017) + 2026-07-19 全量 fetch-data 绕过校验写入 | 2026-09-14 | M1-2 产品感知质检 + 口径标注; 不自动改数据 | M2 权益事件入账 / M3 数据版本; ⚠️ 增量遇拆分日会阻断, 须人工核验, **勿用全量 fetch-data 绕过** |
+| I-09 | 历史行情含未调整权益事件跳变（拆分/折算 10+ 处）+ 2026-07-19 全量 fetch-data 绕过校验写入 → **M8（2026-09-20）已建权益事件登记表（schema v7, 12 条）与拆分感知质检**: 登记命中→不阻断, 未登记→critical; 方案2（账户入账）登记至 Phase 1 | 2026-09-14 | M1-2 产品感知质检 + 口径标注; M8 登记表/质检/脚本; 不自动改数据 | 方案2（官方分红/拆分数据接入 + 账户入账）在 Phase 1; 512100 因子待核验; ⚠️ 增量遇未登记拆分日仍阻断, 人工核验后登记, **勿用全量 fetch-data 绕过** |
 
 ---
 
@@ -445,14 +613,24 @@
 10. ~~T0.9: 自研回测循环 v0.1~~ (已完成 — EV-013; 偏差 0.044% < 1%, 交收差一天 ✓, 20 tests)
 11. ~~T0.10: Streamlit 信号面板~~ (已完成 — EV-014; AppTest 冒烟 + headless 服务验证, 16 tests)
 12. **🎉 P0 Phase 完成 (旧口径)** (2026-09-13): 交付物 10/10, Gate 6/6
-13. **当前: Phase 0.5 — M5 ✅ 完成（B0/B1 基准 + 实验记录 + 同口径）, 待确认启动 M6** (2026-09-15)
-    - M1–M5 交付: A 类纠偏 + Phase 0 收尾 + AGENTS v3.0; 账户/四类记录/schema v3; 四层池/schema v4; 调仓规划/状态化止损/schema v5; B0/B1 基准与实验记录
-    - 关键产出: 411/411 测试; `data/backups/` pre_v2→v5 快照与演练副本; `uv run baseline` CLI; 基准真实数据结果（B0 +104.72%/−31.04%, B1 +102.16%/−29.84%, 研究示例配置）
-    - 下一步 M6: 基础绩效（期末−期初−净入金=投资盈亏）、入金不计收益、贡献与差额单列、面板扩展（实际/目标、待处理建议、B0/B1/A 净值对照）
-    - 纪律: 每批"实现→验证→更新审计/任务→停靠汇报", 待用户确认后进入下一节
-14. ✅ 全量测试: 411/411 通过 (2026-09-15)
+13. **当前: Phase 0.5 + M8 ✅ 完成（权益事件登记/拆分感知质检）** (2026-09-20)
+    - M1–M8 交付: A 类纠偏 + Phase 0 收尾; 账户/四类记录; 四层池; 调仓规划/状态化止损; B0/B1 基准; 绩效/面板; 演练验收; 权益事件登记与拆分感知质检
+    - 关键产出: 447/447 测试; `data/backups/` pre_v2→v7 快照 + 演练报告; `equity_events` 12 条登记（推断值待核验）
+    - **下一步由用户确认**: Phase 1（含 I-09 方案2 权益事件入账、I-02 Python 版本决策、少量因子验证）; 不自动进入
+    - 纪律: 真实账户启用 Gate 未触发; Phase 0.5 完成 ≠ 允许实盘
+14. ✅ 全量测试: 447/447 通过 (2026-09-20)
 15. 📋 常用运行命令见 §七 (面板/取数/回测/测试)
 16. 参考: `docs/task-phase0.5.md`; `docs/spec.md` v3.0 §8/§9; `docs/plan.md` M1–M7
+17. **Phase 1.1 完成 — P11-M0–M6 全部 ✅（2026-09-29 收官）**
+    - 任务文件 `docs/task-phase1.1.md`（用户已确认）; **§11 验收与交接报告**（P11-A1–A10 全过 / 在线演示 / P11-D1–D9 / 支持矩阵 / P1-R1–R6 独立状态）; 交接见 `HANDOFF.md`
+    - M1 完成: 36 项接口实测（探针 `scripts/probe_phase11_interfaces.py`; JSON 证据 `data/backups/probe_phase11_20260928_*.json`）; 附录 A 能力表固化; 暂缓项 = ETF 跟踪质量、底层估值映射（明确记录）
+    - M2 完成: schema v8 五表 + `securities.py` 身份解析 + `diag_data.py` 统一取数/日历/事件检查; `rehearsal_v8` 副本演练 + 真实库应用; 股票口径 hfq（全量替换）
+    - M3 完成: 指标库 `technical.py` + 规则卡冻结（diag-v0.1-research）+ 注册段 D01–D12 + 计分/解释 + 快照状态机 + `diagnosis_service.py`; `price_version` 修正为口径版本
+    - M5 完成: plotly 6.9.0 入主依赖（D1）; 面板双模块（账户与信号默认 + 单标的诊断）; 三入口 + 六个月日K（全史预热）+ 刷新冷却去抖/手动刷新; 名单服务; headless health=ok; `QUANT_PILOT_DB` 可指向演练副本
+    - M4 完成: 条件规则卡冻结（cond-v0.1-research）+ `fundamental_data.py` + `condition_checks.py`（股票 9 项 / ETF 8 项; 单列展示不混技术分）; 名录新浪快照兜底 + NaN 修复
+    - M6 完成: 验收对照全过; 在线端到端演示（6 类样本, 证据 `m6_e2e_demo_20260929_2246.json`）; 回归 **663/663** + `rehearsal_m7` ALL_OK + `backtest` 偏差 0.043%/0.031%; 银行权益字段修复
+    - 下一步: **Phase 1 研究（P1-R1–R6, 全部未开始, 需用户确认）**: 先 P1-R1（I-09 方案2 权益入账 + A 回测风控对齐）→ P1-R2/R3 因子与 RankIC/ICIR → R4/R5 → R6（先做 I-02 决策）
+    - 纪律: 诊断链不写账户/目标/建议/池; 未核验权益事件窗口暂停相关指标; 规则卡冻结后调参走新 rules_version; **Phase 1.1 完成 ≠ 实盘授权（真实账户启用 Gate 未触发）**
 
 ---
 
@@ -481,6 +659,10 @@ uv run baseline --strategy B1 --write-account     # 同时把模拟账户写入�
 # Streamlit 信号面板 (默认 http://localhost:8501)
 uv run streamlit run dashboard/app.py
 
-# 全量测试 (411)
+# 全量测试 (447)
 uv run pytest tests/ -v
+
+# 权益事件登记 (M8; --check 列出未登记巨幅跳变; --apply 登记已核验清单)
+uv run python scripts/register_equity_events.py --check
+uv run python scripts/register_equity_events.py --apply
 ```

@@ -33,11 +33,12 @@
 # 元数据
 metadata:
   registry_version: "1.0"
-  last_updated: "2025-07-18"
+  last_updated: "2026-09-28"
   total_factors: 0
   active_factors: 0
   deprecated_factors: 0
   evaluating_factors: 0
+  note: "factors 段 = Phase 1 收益预测因子 (待 P1-R2 填充); diagnostic_indicators 段 = Phase 1.1 诊断指标 (非收益预测因子, 不参与 IC 评估)"
 
 # 因子索引 (按类别分组)
 index:
@@ -48,3 +49,159 @@ index:
 
 # 因子定义 (待 P0-D3 / P1-D1 开始填充)
 factors: {}
+
+# ============================================================
+# 诊断指标 (Phase 1.1, P11-M3; 用途=diagnostic)
+# ============================================================
+# 说明 (spec §8.4.5): 诊断指标用于单标的规则诊断, **不是**收益预测因子;
+# 与 factors 段分离, 不参与 RankIC/ICIR 评估 (P1-R2/R3 的因子清单不含本段)。
+# 注册字段: name/version/formula/inputs(口径)/units/window/init/min_samples/
+#           missing_policy/applicable_types/usage/code_path。
+# 公式实现: src/factor_engineering/technical.py (模块 docstring 含完整口径声明);
+# 参数: config/diagnostics.yaml (研究示例规则卡, rules_version=diag-v0.1-research)。
+
+diagnostic_indicators:
+  D01:
+    name: "MA_简单移动平均"
+    version: "d1.0"
+    formula: "SMA(close, N) = mean(close[t-N+1..t])"
+    inputs: "close (研究价格口径: ETF 不复权 / 股票后复权 hfq)"
+    units: "价格单位 (元, 复权口径)"
+    window: "N ∈ {20, 60, 200} (规则卡 ma_windows)"
+    min_samples: "N"
+    missing_policy: "样本不足 → 空值; 不零填充"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_sma"
+  D02:
+    name: "MA_价格偏离"
+    version: "d1.0"
+    formula: "close / SMA(close, N) - 1"
+    inputs: "close, SMA"
+    units: "比例"
+    window: "N ∈ {20, 60, 200}"
+    min_samples: "N"
+    missing_policy: "MA ≤ 0 或空 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_ma_deviation"
+  D03:
+    name: "MA_斜率(变化率)"
+    version: "d1.0"
+    formula: "SMA_t / SMA_{t-w} - 1, w=20"
+    inputs: "SMA(close, 最长窗口)"
+    units: "比例"
+    window: "w = 20 (规则卡 ma_slope_window)"
+    min_samples: "最长均线窗口 + w"
+    missing_policy: "任一端点空 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_ma_slope"
+  D04:
+    name: "动量_12-1区间"
+    version: "d1.0"
+    formula: "P_(t-21) / P_(t-252) - 1 (精确端点比值, spec §7.2)"
+    inputs: "close (一致口径研究价格)"
+    units: "比例"
+    window: "lookback=252, skip=21 (1 月≈21 交易日, 显式映射)"
+    min_samples: "253"
+    missing_policy: "历史不足 → 空值; 不拆成两段收益相减"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic (可被 P1-R2 复用, 仍须独立验收)"
+    code_path: "factor_engineering.technical::calc_momentum_12_1"
+  D05:
+    name: "ATR_Wilder"
+    version: "d1.0"
+    formula: "Wilder 平滑 TR (复用 strategies.risk_manager.calc_atr_series)"
+    inputs: "high/low/close (同口径)"
+    units: "价格单位"
+    window: "period=14"
+    min_samples: "15"
+    missing_policy: "数据不足 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_atr_series"
+  D06:
+    name: "ATR占价格比"
+    version: "d1.0"
+    formula: "ATR(14) / close"
+    inputs: "ATR, close (同口径)"
+    units: "比例"
+    window: "14 (与 D05 一致)"
+    min_samples: "15"
+    missing_policy: "close ≤ 0 或空 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_atr_pct"
+  D07:
+    name: "收益波动率_20日"
+    version: "d1.0"
+    formula: "std(ln(P_t/P_{t-1}), 20) 样本标准差 (ddof=1, 日频未年化)"
+    inputs: "close"
+    units: "比例"
+    window: "20"
+    min_samples: "21"
+    missing_policy: "不足 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_return_volatility"
+  D08:
+    name: "波动率_历史位置"
+    version: "d1.0"
+    formula: "当前波动率在过去 252 观测内的经验分位 (含当日 ≤计数/样本数)"
+    inputs: "D07 序列"
+    units: "0–1"
+    window: "252, min_periods=120"
+    min_samples: "120 个有效样本"
+    missing_policy: "样本不足 → 空值; 仅用当时可得样本"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_percentile_rank"
+  D09:
+    name: "RSI_Wilder"
+    version: "d1.0"
+    formula: "100 - 100/(1+avg_gain/avg_loss); 初始为前 14 涨跌均值"
+    inputs: "close"
+    units: "0–100"
+    window: "14"
+    min_samples: "15"
+    missing_policy: "零涨→100; 零跌→0; 双零(无变动)→50 中性"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic (展示项)"
+    code_path: "factor_engineering.technical::calc_rsi"
+  D10:
+    name: "布林带_位置与带宽"
+    version: "d1.0"
+    formula: "mid=SMA(20); band=2×σ(ddof=0); pos=(close-lower)/band; bw=band/mid"
+    inputs: "close"
+    units: "pos 无量纲; bw 比例"
+    window: "20, 2σ"
+    min_samples: "20"
+    missing_policy: "带宽=0 → pos 空值 (不可评估, 不虚构 0.5)"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic (展示项)"
+    code_path: "factor_engineering.technical::calc_bollinger"
+  D11:
+    name: "量额活跃度"
+    version: "d1.0"
+    formula: "amount_t / mean(amount[t-w..t-1]) (基准 shift(1), 当日不参与)"
+    inputs: "amount"
+    units: "倍数"
+    window: "60, min_periods=20"
+    min_samples: "21"
+    missing_policy: "基准空或 0 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic (展示项; 不作收益预测预设)"
+    code_path: "factor_engineering.technical::calc_amount_activity"
+  D12:
+    name: "ATR%相对基准"
+    version: "d1.0"
+    formula: "atr_pct_t / mean(atr_pct[t-w..t-1]) (基准 shift(1))"
+    inputs: "D06 序列"
+    units: "倍数"
+    window: "60, min_periods=20"
+    min_samples: "atr_pct 有效样本 ≥20"
+    missing_policy: "基准空或 0 → 空值"
+    applicable_types: ["etf", "stock"]
+    usage: "diagnostic"
+    code_path: "factor_engineering.technical::calc_ratio_to_baseline"

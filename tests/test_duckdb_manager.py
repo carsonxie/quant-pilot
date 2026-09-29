@@ -10,7 +10,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from data_pipeline.duckdb_manager import DuckDBManager
+from data_pipeline.duckdb_manager import SCHEMA_VERSION, DuckDBManager
 
 
 @pytest.fixture
@@ -250,7 +250,7 @@ class TestSchemaMigration:
             "SELECT version FROM schema_version ORDER BY version"
         ).fetchall()
         db.close()
-        assert [v[0] for v in versions] == [1, 2, 3, 4, 5]
+        assert [v[0] for v in versions] == list(range(1, SCHEMA_VERSION + 1))
 
     def test_upsert_without_version_keeps_existing(self, db):
         """旧调用方不传版本列时, 更新不覆盖已记录的版本 (COALESCE 保护)."""
@@ -291,16 +291,28 @@ class TestV3TablesAndRuns:
             row[0] for row in
             db.conn.execute("SELECT version FROM schema_version ORDER BY 1").fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5]
+        assert versions == list(range(1, SCHEMA_VERSION + 1))
         assert db.table_exists("account_events")
         assert db.table_exists("instruments")
         assert db.table_exists("strategy_states")
+        assert db.table_exists("equity_events")
+        assert db.table_exists("securities")
+        assert db.table_exists("diagnostic_snapshots")
         logs = db.conn.execute(
             "SELECT version, status FROM schema_migration_log ORDER BY version"
         ).fetchall()
         assert (3, "applied") in logs
         assert (4, "applied") in logs
         assert (5, "applied") in logs
+        assert (6, "applied") in logs
+        assert (7, "applied") in logs
+        # v6: experiments 追踪列已补齐
+        cols = {
+            row[1] for row in db.conn.execute(
+                "PRAGMA table_info('experiments')"
+            ).fetchall()
+        }
+        assert {"mode", "started_at", "finished_at", "error"} <= cols
         # 迁移不丢失 v1 事实
         assert db.get_table_count("trade_signals") == 1
         db.close()

@@ -1,7 +1,7 @@
 # ============================================================
 # settings.yaml — Quant-Pilot 全局参数唯一来源
 # ============================================================
-# 版本: v1.0 | 创建: 2025-07-18
+# 版本: v1.0 | 创建: 2026-07-18
 #
 # 规则:
 #   - 所有参数必须从此文件读取，禁止在代码中硬编码
@@ -163,10 +163,21 @@ rebalancing:
   lot_size: 100                 # 最小交易单位 (份/手, 与回测一致)
   cash_reserve: 0.0             # 现金预留 (元); 只影响可用量, 不减少净资产 (账户层预留优先)
 
+# --- Phase 1.1 诊断数据 (P11-M2; 仅诊断取数/刷新, 不改变任何交易参数) ---
+# 本段为数据层运行参数 (研究默认值); 规则卡 (评分/阈值) 在 config/diagnostics.yaml (M3)
+diagnostics:
+  min_history_days: 320          # 计算最小历史 (覆盖 MA200 与 12–1 及预热; 六个月仅为显示范围)
+  refetch_buffer_days: 10        # 增量补拉缓冲 (自然日, 覆盖长假)
+  fetch_timeout_seconds: 30      # 单次接口调用超时 (秒)
+  fetch_retries: 3               # 接口失败重试次数 (指数退避)
+  fetch_backoff_base: 2.0        # 重试退避基数 (秒)
+  session_close_cutoff: "18:30"  # 本地时间 (Asia/Shanghai 假设): 交易日何时视为"数据已完成"
+  securities_cache_ttl_days: 30  # 身份名录缓存 TTL (过期仅影响未命中时的重载)
+
 # --- 消息推送 ---
 notification:
   channel: "pushplus"           # pushplus / feishu / email
-  pushplus_token: ""            # 从环境变量或本地文件读取
+  pushplus_token: "41cf24ec1e854e3d8a188fd66403e5d3"            # 从环境变量或本地文件读取
   retry_count: 3
 
 # --- 日志 ---

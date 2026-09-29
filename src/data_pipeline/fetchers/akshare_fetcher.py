@@ -509,24 +509,36 @@ def main() -> None:
         logger.info("Fetch complete: %d rows", len(df))
 
         # 全量导入不阻断, 但输出产品感知质检摘要 (历史含已知权益事件跳变;
-        # 明细由 validator 日志给出 — C10)
+        # 明细由 validator 日志给出 — C10); 已登记权益事件 (M8/I-09 方案1)
+        # 命中则不打 critical, 只留 info。
         from data_pipeline.processors.validator import validate_ohlcv
 
-        issues = validate_ohlcv(df)
-        n_critical = sum(1 for i in issues if i.severity == "critical")
-        if n_critical:
-            logger.warning(
-                "全量导入质检: %d 个阻断级问题 (历史权益事件/疑似脏数据, "
-                "不阻断导入; 每日增量流程会按阻断处理, 明细见上方日志)",
-                n_critical,
-            )
-
-        # 入库
         db_path = project_root / settings["storage"]["db_path"]
         from data_pipeline.duckdb_manager import DuckDBManager
 
         db = DuckDBManager(str(db_path))
         db.init_database()
+
+        issues = validate_ohlcv(
+            df, registered_equity_events=db.get_equity_events(),
+        )
+        n_critical = sum(1 for i in issues if i.severity == "critical")
+        n_registered = sum(
+            1 for i in issues if i.check == "registered_equity_event"
+        )
+        if n_registered:
+            logger.info(
+                "全量导入质检: %d 个标的命中已登记权益事件 (不阻断; "
+                "详见上方 INFO 行)",
+                n_registered,
+            )
+        if n_critical:
+            logger.warning(
+                "全量导入质检: %d 个阻断级问题 (历史权益事件/疑似脏数据, "
+                "不阻断导入; 如需放行可登记: scripts/register_equity_events.py; "
+                "每日增量流程会按阻断处理, 明细见上方日志)",
+                n_critical,
+            )
 
         # 写入 ETF 元数据
         meta_rows = [

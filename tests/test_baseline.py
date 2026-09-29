@@ -396,6 +396,25 @@ class TestRunnerAndExperiment:
                 result_dir=tmp_path,
             )
 
+    def test_failed_experiment_is_recorded(self, db, tmp_path):
+        """失败试验留痕 (状态/原因/起止时间), 不删除 (spec §7.1 / P05-D6)."""
+        from backtest.baseline import BaselineConfig
+        from backtest.baseline_runner import _record_failed_experiment
+
+        settings = make_settings({"AA": 0.5, "__CASH__": 0.5})
+        config = BaselineConfig.from_settings(settings, "B0")
+        started = datetime(2026, 1, 5, 9, 0)
+        _record_failed_experiment(
+            db, "exp-failed-1", "B0", config, settings["project"],
+            "test_flat", START, START, started, RuntimeError("数据为空"),
+        )
+        exp = db.get_experiment("exp-failed-1")
+        assert exp is not None
+        assert exp["status"] == "failed"
+        assert "数据为空" in exp["error"]
+        assert exp["started_at"] is not None and exp["finished_at"] is not None
+        assert exp["mode"] == "research"
+
     def test_adverse_cost_scenario_fees_increase(self, db, tmp_path):
         """更不利成本情景: 费率翻倍 → 费用上升, 结果可比对 (spec §6.3)."""
         days = business_days(3)

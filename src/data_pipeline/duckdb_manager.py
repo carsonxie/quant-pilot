@@ -30,8 +30,12 @@ logger = logging.getLogger(__name__)
 # v1: P0 MVP 6 表; v2: trade_signals.strategy_version (旧记录标注 v0.1, A0-1);
 # v3: 账户/事件/批次/快照 + 四类记录 + 运行/实验/迁移日志 (M2);
 # v4: instruments/universe_versions/universe_members/nav_daily (M3 四层池);
-# v5: strategy_states (持有期高水位/棘轮止损/冷却状态, M4-06)
-SCHEMA_VERSION = 5
+# v5: strategy_states (持有期高水位/棘轮止损/冷却状态, M4-06);
+# v6: experiments.mode/started_at/finished_at/error (实验追踪补全, M6-01);
+# v7: equity_events (未调整权益事件登记 — 拆分感知质检, M8/I-09 方案1);
+# v8: securities/watchlist/watchlist_changes/diag_price_daily/diagnostic_snapshots
+#     (Phase 1.1 诊断: 身份缓存/观察名单/非池行情缓存/诊断快照, P11-M2)
+SCHEMA_VERSION = 8
 
 # ---- DDL (建表语句) ----
 _DDL_OHLCV = """
@@ -273,6 +277,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     result_location VARCHAR,
     status          VARCHAR,
     conclusion      VARCHAR,
+    mode            VARCHAR,                 -- research / paper / backtest / real (v6)
+    started_at      TIMESTAMP,               -- 运行起止 (v6; 失败试验同样保留)
+    finished_at     TIMESTAMP,
+    error           VARCHAR,                 -- 失败原因摘要 (v6)
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -362,6 +370,99 @@ CREATE TABLE IF NOT EXISTS strategy_states (
 )
 """
 
+_DDL_EQUITY_EVENTS = """
+CREATE TABLE IF NOT EXISTS equity_events (
+    symbol           VARCHAR NOT NULL,
+    event_date       DATE NOT NULL,
+    event_type       VARCHAR,                -- split_implied (拆分/份额折算, 从价格跳变推断)
+    ratio            DOUBLE NOT NULL,        -- 事件倍率 (>0)
+    ratio_semantics  VARCHAR,                -- price_factor: 后一收盘 = 前一收盘 / ratio
+                                             --   (1:2 拆分 → ratio=2.0, 价格减半)
+    source           VARCHAR,                -- inferred_from_price (反推) / official (官方)
+    inferred         BOOLEAN DEFAULT TRUE,   -- 推断值待核验
+    verified         BOOLEAN DEFAULT FALSE,  -- 人工/官方核验通过
+    registered_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    method           VARCHAR,                -- 反推方法说明 (如前5日均值比值)
+    note             VARCHAR,
+    PRIMARY KEY (symbol, event_date)
+)
+"""
+
+# ---- v8: Phase 1.1 诊断表 (P11-M2; 与池语义无关, 不写账户/建议/执行链) ----
+
+_DDL_SECURITIES = """
+CREATE TABLE IF NOT EXISTS securities (
+    symbol       VARCHAR PRIMARY KEY,     -- 6 位代码
+    name         VARCHAR,
+    exchange     VARCHAR,                 -- SH / SZ / BJ
+    sec_type     VARCHAR,                 -- stock / etf
+    market_type  VARCHAR,                 -- A股 / 跨境 / 商品 (ETF); 股票=A股
+    adjustment   VARCHAR,                 -- 研究价格口径: none(不复权) / hfq(后复权)
+    source       VARCHAR,                 -- sina_stock_list / sina_etf_list / instruments / manual
+    fetched_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    note         VARCHAR
+)
+"""
+
+_DDL_WATCHLIST = """
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol      VARCHAR PRIMARY KEY,
+    name        VARCHAR,
+    exchange    VARCHAR,
+    sec_type    VARCHAR,                  -- stock / etf
+    added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    note        VARCHAR,
+    status      VARCHAR DEFAULT 'active', -- active / removed (移除不删历史, 保留记录)
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+_DDL_WATCHLIST_CHANGES = """
+CREATE TABLE IF NOT EXISTS watchlist_changes (
+    symbol      VARCHAR NOT NULL,
+    action      VARCHAR NOT NULL,         -- add / remove / note_update
+    detail      VARCHAR,
+    changed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+_DDL_DIAG_PRICE_DAILY = """
+CREATE TABLE IF NOT EXISTS diag_price_daily (
+    symbol      VARCHAR NOT NULL,
+    date        DATE NOT NULL,
+    open        DOUBLE,
+    high        DOUBLE,
+    low         DOUBLE,
+    close       DOUBLE,
+    volume      DOUBLE,
+    amount      DOUBLE,
+    source      VARCHAR,                  -- sina_etf / sina_stock
+    adjustment  VARCHAR,                  -- none / hfq (研究价格口径, 每标的单一)
+    fetched_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, date)
+)
+"""
+
+_DDL_DIAGNOSTIC_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS diagnostic_snapshots (
+    snapshot_id        VARCHAR PRIMARY KEY,  -- 确定性: symbol+as_of+rules_version+price_version
+    symbol             VARCHAR NOT NULL,
+    as_of              DATE NOT NULL,        -- 诊断时点 (最近已完成交易日)
+    calculated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    rules_version      VARCHAR,              -- 规则卡版本
+    price_version      VARCHAR,              -- 价格口径版本 (源+adjustment+最后日期)
+    run_kind           VARCHAR DEFAULT 'live', -- live(实际运行) / rebuild(历史重建)
+    metrics_json       VARCHAR,              -- 原始指标
+    contributions_json VARCHAR,             -- 分项贡献
+    checks_json        VARCHAR,              -- 条件检查项与缺失原因
+    score              DOUBLE,               -- 技术风险分 (缺失=NULL, 不出三态)
+    status             VARCHAR,              -- 正常 / 警戒 / 防御
+    completeness       VARCHAR,              -- 数据完整度
+    trigger            VARCHAR,              -- 初始/新增警戒/新增防御/恢复/数据失效/版本变化
+    UNIQUE (symbol, as_of, rules_version, price_version)
+)
+"""
+
 _ALL_DDL: list[tuple[str, str]] = [
     ("ohlcv_daily", _DDL_OHLCV),
     ("etf_metadata", _DDL_ETF_META),
@@ -385,6 +486,12 @@ _ALL_DDL: list[tuple[str, str]] = [
     ("universe_members", _DDL_UNIVERSE_MEMBERS),
     ("nav_daily", _DDL_NAV_DAILY),
     ("strategy_states", _DDL_STRATEGY_STATES),
+    ("equity_events", _DDL_EQUITY_EVENTS),
+    ("securities", _DDL_SECURITIES),
+    ("watchlist", _DDL_WATCHLIST),
+    ("watchlist_changes", _DDL_WATCHLIST_CHANGES),
+    ("diag_price_daily", _DDL_DIAG_PRICE_DAILY),
+    ("diagnostic_snapshots", _DDL_DIAGNOSTIC_SNAPSHOTS),
 ]
 
 
@@ -561,6 +668,81 @@ class DuckDBManager:
                 ],
             )
             logger.info("Schema migrated to v5 (%s)", checks_v5)
+
+        if current < 6:
+            # v6: 实验记录补全 (mode/起止时间/失败原因; 只增列, 不改写旧事实)
+            for column, dtype in (
+                ("mode", "VARCHAR"), ("started_at", "TIMESTAMP"),
+                ("finished_at", "TIMESTAMP"), ("error", "VARCHAR"),
+            ):
+                self.conn.execute(
+                    f"ALTER TABLE experiments ADD COLUMN IF NOT EXISTS {column} {dtype}"
+                )
+            checks_v6 = {
+                t: self.get_table_count(t)
+                for t in ("ohlcv_daily", "trade_signals", "experiments")
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                [6, "v6: experiments.mode/started_at/finished_at/error (实验追踪)"],
+            )
+            self.conn.execute(
+                "INSERT INTO schema_migration_log "
+                "(version, description, checks_json, status) VALUES (?, ?, ?, ?)",
+                [
+                    6,
+                    "v6: experiments.mode/started_at/finished_at/error (M6-01)",
+                    json.dumps(checks_v6, ensure_ascii=False),
+                    "applied",
+                ],
+            )
+            logger.info("Schema migrated to v6 (%s)", checks_v6)
+
+        if current < 7:
+            # v7: 权益事件登记表 (只增表; M8/I-09 方案1: 拆分感知质检)
+            checks_v7 = {
+                t: self.get_table_count(t)
+                for t in ("ohlcv_daily", "trade_signals", "equity_events")
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                [7, "v7: equity_events (未调整权益事件登记; 拆分感知质检)"],
+            )
+            self.conn.execute(
+                "INSERT INTO schema_migration_log "
+                "(version, description, checks_json, status) VALUES (?, ?, ?, ?)",
+                [
+                    7,
+                    "v7: equity_events (M8/I-09 方案1)",
+                    json.dumps(checks_v7, ensure_ascii=False),
+                    "applied",
+                ],
+            )
+            logger.info("Schema migrated to v7 (%s)", checks_v7)
+
+        if current < 8:
+            # v8: Phase 1.1 诊断表 (只增表; 与交易链隔离 — 不写账户/目标/建议/执行)
+            checks_v8 = {
+                t: self.get_table_count(t)
+                for t in ("ohlcv_daily", "trade_signals", "securities",
+                          "watchlist", "diag_price_daily", "diagnostic_snapshots")
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                [8, "v8: securities/watchlist/watchlist_changes/diag_price_daily/"
+                    "diagnostic_snapshots (Phase 1.1 诊断)"],
+            )
+            self.conn.execute(
+                "INSERT INTO schema_migration_log "
+                "(version, description, checks_json, status) VALUES (?, ?, ?, ?)",
+                [
+                    8,
+                    "v8: Phase 1.1 诊断表 (P11-M2; 只增表, 不改既有事实)",
+                    json.dumps(checks_v8, ensure_ascii=False),
+                    "applied",
+                ],
+            )
+            logger.info("Schema migrated to v8 (%s)", checks_v8)
 
     # ------------------------------------------------------------------
     # OHLCV 写入 (UPSERT — 幂等)
@@ -1138,6 +1320,8 @@ class DuckDBManager:
             ("pool_version", pl.Utf8), ("config_json", pl.Utf8),
             ("cost_scenario", pl.Utf8), ("purpose", pl.Utf8),
             ("result_location", pl.Utf8), ("conclusion", pl.Utf8),
+            ("mode", pl.Utf8), ("started_at", pl.Datetime),
+            ("finished_at", pl.Datetime), ("error", pl.Utf8),
         ):
             if col not in payload.columns:
                 payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
@@ -1148,10 +1332,12 @@ class DuckDBManager:
                 INSERT INTO experiments
                     (experiment_id, kind, code_version, data_version,
                      pool_version, config_json, cost_scenario, purpose,
-                     result_location, status, conclusion)
+                     result_location, status, conclusion, mode,
+                     started_at, finished_at, error)
                 SELECT experiment_id, kind, code_version, data_version,
                        pool_version, config_json, cost_scenario, purpose,
-                       result_location, status, conclusion
+                       result_location, status, conclusion, mode,
+                       started_at, finished_at, error
                 FROM _experiments
                 ON CONFLICT (experiment_id) DO UPDATE SET
                     code_version    = EXCLUDED.code_version,
@@ -1162,7 +1348,11 @@ class DuckDBManager:
                     purpose         = EXCLUDED.purpose,
                     result_location = EXCLUDED.result_location,
                     status          = EXCLUDED.status,
-                    conclusion      = EXCLUDED.conclusion
+                    conclusion      = EXCLUDED.conclusion,
+                    mode            = EXCLUDED.mode,
+                    started_at      = EXCLUDED.started_at,
+                    finished_at     = EXCLUDED.finished_at,
+                    error           = EXCLUDED.error
             """)
         finally:
             self.conn.unregister("_experiments")
@@ -1735,6 +1925,437 @@ class DuckDBManager:
             result = self.conn.execute(
                 "SELECT * FROM strategy_states ORDER BY symbol"
             ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    # ------------------------------------------------------------------
+    # 权益事件登记 (M8/I-09 方案1: 拆分感知质检)
+    # ------------------------------------------------------------------
+
+    def upsert_equity_events(self, df: pl.DataFrame) -> int:
+        """登记权益事件 (symbol + event_date 主键 UPSERT, 幂等).
+
+        语义: ratio 为事件倍率, price_factor 下"后一收盘 ≈ 前一收盘 / ratio"
+        (1:2 拆分 → ratio=2.0)。只登记; 不修改任何价格数据。
+        """
+        if df.is_empty():
+            return 0
+        required = {"symbol", "event_date", "ratio"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"equity_events DataFrame missing columns: {missing}")
+        payload = df
+        for col, dtype in (
+            ("event_type", pl.Utf8), ("ratio_semantics", pl.Utf8),
+            ("source", pl.Utf8), ("inferred", pl.Boolean),
+            ("verified", pl.Boolean), ("method", pl.Utf8), ("note", pl.Utf8),
+        ):
+            if col not in payload.columns:
+                payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
+        pdf = payload.to_pandas()
+        self.conn.register("_equity_events", pdf)
+        try:
+            self.conn.execute("""
+                INSERT INTO equity_events
+                    (symbol, event_date, event_type, ratio, ratio_semantics,
+                     source, inferred, verified, method, note, registered_at)
+                SELECT symbol, event_date,
+                       COALESCE(event_type, 'split_implied'),
+                       ratio,
+                       COALESCE(ratio_semantics, 'price_factor'),
+                       COALESCE(source, 'inferred_from_price'),
+                       COALESCE(inferred, TRUE),
+                       COALESCE(verified, FALSE),
+                       method, note, now()
+                FROM _equity_events
+                ON CONFLICT (symbol, event_date) DO UPDATE SET
+                    event_type      = EXCLUDED.event_type,
+                    ratio           = EXCLUDED.ratio,
+                    ratio_semantics = EXCLUDED.ratio_semantics,
+                    source          = EXCLUDED.source,
+                    inferred        = EXCLUDED.inferred,
+                    verified        = EXCLUDED.verified,
+                    method          = EXCLUDED.method,
+                    note            = EXCLUDED.note
+            """)
+        finally:
+            self.conn.unregister("_equity_events")
+        return len(df)
+
+    def get_equity_events(
+        self, symbols: list[str] | None = None, only_verified: bool = False,
+    ) -> pl.DataFrame:
+        """读取已登记权益事件 (symbol/date 排序; 供质检与登记脚本)."""
+        if not self.table_exists("equity_events"):
+            return pl.DataFrame()
+        query = "SELECT * FROM equity_events"
+        conditions: list[str] = []
+        params: list = []
+        if symbols:
+            placeholders = ", ".join(["?" for _ in symbols])
+            conditions.append(f"symbol IN ({placeholders})")
+            params.extend(symbols)
+        if only_verified:
+            conditions.append("verified = TRUE")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY symbol, event_date"
+        result = self.conn.execute(query, params).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    # ------------------------------------------------------------------
+    # v8: Phase 1.1 诊断 — 身份缓存 / 观察名单 / 非池行情 / 诊断快照
+    # (与交易链隔离: 本节任何写入都不产生账户事件/目标/建议/执行反馈)
+    # ------------------------------------------------------------------
+
+    def upsert_securities(self, df: pl.DataFrame) -> int:
+        """写入/更新证券身份缓存 (symbol 主键; 诊断用, 不写入池成员)."""
+        if df.is_empty():
+            return 0
+        if "symbol" not in df.columns:
+            raise ValueError("securities DataFrame missing 'symbol' column")
+
+        payload = df
+        for col, dtype in (
+            ("name", pl.Utf8), ("exchange", pl.Utf8), ("sec_type", pl.Utf8),
+            ("market_type", pl.Utf8), ("adjustment", pl.Utf8),
+            ("source", pl.Utf8), ("note", pl.Utf8),
+        ):
+            if col not in payload.columns:
+                payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
+
+        self.conn.register("_securities", payload.to_pandas())
+        try:
+            self.conn.execute("""
+                INSERT INTO securities
+                    (symbol, name, exchange, sec_type, market_type, adjustment, source, note)
+                SELECT symbol, name, exchange, sec_type, market_type, adjustment, source, note
+                FROM _securities
+                ON CONFLICT (symbol) DO UPDATE SET
+                    name        = COALESCE(EXCLUDED.name, securities.name),
+                    exchange    = COALESCE(EXCLUDED.exchange, securities.exchange),
+                    sec_type    = COALESCE(EXCLUDED.sec_type, securities.sec_type),
+                    market_type = COALESCE(EXCLUDED.market_type, securities.market_type),
+                    adjustment  = COALESCE(EXCLUDED.adjustment, securities.adjustment),
+                    source      = COALESCE(EXCLUDED.source, securities.source),
+                    note        = COALESCE(EXCLUDED.note, securities.note),
+                    fetched_at  = now()
+            """)
+        finally:
+            self.conn.unregister("_securities")
+        return len(df)
+
+    def get_security(self, symbol: str) -> dict | None:
+        """单只证券身份 (缓存; 无 → None)."""
+        row = self.conn.execute(
+            "SELECT * FROM securities WHERE symbol = ?", [symbol]
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in self.conn.description]
+        return dict(zip(columns, row, strict=True))
+
+    def get_securities(self, symbols: list[str] | None = None) -> pl.DataFrame:
+        """查询证券身份缓存 (不传 symbols → 全部)."""
+        if symbols:
+            placeholders = ", ".join(["?" for _ in symbols])
+            result = self.conn.execute(
+                f"SELECT * FROM securities WHERE symbol IN ({placeholders}) "
+                "ORDER BY symbol",
+                list(symbols),
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                "SELECT * FROM securities ORDER BY symbol"
+            ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    def find_securities_by_name(self, keyword: str, limit: int = 20) -> pl.DataFrame:
+        """名称模糊搜索 (探索入口用; ILIKE 参数化, 无注入)."""
+        result = self.conn.execute(
+            "SELECT * FROM securities WHERE name ILIKE ? ORDER BY symbol LIMIT ?",
+            [f"%{keyword}%", int(limit)],
+        ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    # ---- 观察名单 ----
+
+    def _log_watchlist_change(self, symbol: str, action: str, detail: str | None) -> None:
+        self.conn.execute(
+            "INSERT INTO watchlist_changes (symbol, action, detail) VALUES (?, ?, ?)",
+            [symbol, action, detail],
+        )
+
+    def add_watchlist(
+        self, symbol: str, name: str | None = None, exchange: str | None = None,
+        sec_type: str | None = None, note: str | None = None,
+    ) -> None:
+        """加入/恢复观察名单 (幂等; 重复添加已 active 的行不重复记录变更)."""
+        existing = self.conn.execute(
+            "SELECT status, note FROM watchlist WHERE symbol = ?", [symbol]
+        ).fetchone()
+        if existing is None:
+            self.conn.execute(
+                "INSERT INTO watchlist (symbol, name, exchange, sec_type, note, status) "
+                "VALUES (?, ?, ?, ?, ?, 'active')",
+                [symbol, name, exchange, sec_type, note],
+            )
+            self._log_watchlist_change(symbol, "add", note)
+            return
+        was_removed = existing[0] != "active"
+        self.conn.execute(
+            "UPDATE watchlist SET name = COALESCE(?, name), exchange = COALESCE(?, exchange), "
+            "sec_type = COALESCE(?, sec_type), note = COALESCE(?, note), "
+            "status = 'active', updated_at = now() WHERE symbol = ?",
+            [name, exchange, sec_type, note, symbol],
+        )
+        if was_removed:
+            self._log_watchlist_change(symbol, "add", "恢复 (此前已移除)")
+
+    def remove_watchlist(self, symbol: str, reason: str | None = None) -> None:
+        """移出观察名单 (软删除, 幂等; 不删除行情/诊断历史)."""
+        existing = self.conn.execute(
+            "SELECT status FROM watchlist WHERE symbol = ?", [symbol]
+        ).fetchone()
+        if existing is None or existing[0] != "active":
+            return
+        self.conn.execute(
+            "UPDATE watchlist SET status = 'removed', updated_at = now() WHERE symbol = ?",
+            [symbol],
+        )
+        self._log_watchlist_change(symbol, "remove", reason)
+
+    def update_watchlist_note(self, symbol: str, note: str) -> None:
+        """更新名单备注 (记录变更; 行不存在则报错)."""
+        existing = self.conn.execute(
+            "SELECT note FROM watchlist WHERE symbol = ?", [symbol]
+        ).fetchone()
+        if existing is None:
+            raise ValueError(f"watchlist symbol not found: {symbol}")
+        self.conn.execute(
+            "UPDATE watchlist SET note = ?, updated_at = now() WHERE symbol = ?",
+            [note, symbol],
+        )
+        if (existing[0] or None) != (note or None):
+            self._log_watchlist_change(symbol, "note_update", note)
+
+    def get_watchlist(self, status: str | None = "active") -> pl.DataFrame:
+        """观察名单 (status=None → 全部)."""
+        if status is None:
+            result = self.conn.execute(
+                "SELECT * FROM watchlist ORDER BY added_at, symbol"
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                "SELECT * FROM watchlist WHERE status = ? ORDER BY added_at, symbol",
+                [status],
+            ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    def get_watchlist_changes(
+        self, symbol: str | None = None, limit: int = 200,
+    ) -> pl.DataFrame:
+        """名单变更记录 (最新在前)."""
+        if symbol:
+            result = self.conn.execute(
+                "SELECT * FROM watchlist_changes WHERE symbol = ? "
+                "ORDER BY changed_at DESC LIMIT ?",
+                [symbol, int(limit)],
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                "SELECT * FROM watchlist_changes ORDER BY changed_at DESC LIMIT ?",
+                [int(limit)],
+            ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    # ---- 非池标的研究行情缓存 ----
+
+    _DIAG_PRICE_COLUMNS = (
+        "symbol", "date", "open", "high", "low", "close", "volume", "amount",
+        "source", "adjustment",
+    )
+
+    def upsert_diag_prices(self, df: pl.DataFrame) -> int:
+        """非池标的行情缓存 UPSERT (symbol,date 主键; 幂等, 可重建缓存)."""
+        if df.is_empty():
+            return 0
+        for col in ("symbol", "date"):
+            if col not in df.columns:
+                raise ValueError(f"diag_price DataFrame missing '{col}' column")
+
+        payload = df
+        for col, dtype in (
+            ("open", pl.Float64), ("high", pl.Float64), ("low", pl.Float64),
+            ("close", pl.Float64), ("volume", pl.Float64), ("amount", pl.Float64),
+            ("source", pl.Utf8), ("adjustment", pl.Utf8),
+        ):
+            if col not in payload.columns:
+                payload = payload.with_columns(pl.lit(None, dtype=dtype).alias(col))
+        cols = ", ".join(self._DIAG_PRICE_COLUMNS)
+
+        self.conn.register("_diag_prices", payload.to_pandas())
+        try:
+            self.conn.execute(f"""
+                INSERT INTO diag_price_daily ({cols})
+                SELECT {cols} FROM _diag_prices
+                ON CONFLICT (symbol, date) DO UPDATE SET
+                    open       = EXCLUDED.open,
+                    high       = EXCLUDED.high,
+                    low        = EXCLUDED.low,
+                    close      = EXCLUDED.close,
+                    volume     = EXCLUDED.volume,
+                    amount     = EXCLUDED.amount,
+                    source     = EXCLUDED.source,
+                    adjustment = EXCLUDED.adjustment,
+                    fetched_at = now()
+            """)
+        finally:
+            self.conn.unregister("_diag_prices")
+        return len(df)
+
+    def replace_diag_prices(self, symbol: str, df: pl.DataFrame) -> int:
+        """整段替换某标的研究价格 (后复权修订/重建; 删除+写入同一事务).
+
+        仅用于口径会整体重算的标的研究行情 (如 hfq 全量重取);
+        不复权增量更新用 upsert_diag_prices。
+        """
+        cols = ", ".join(self._DIAG_PRICE_COLUMNS)
+        if not df.is_empty():
+            self.conn.register("_diag_replace", df.to_pandas())
+        try:
+            with self.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM diag_price_daily WHERE symbol = ?", [symbol]
+                )
+                if not df.is_empty():
+                    conn.execute(f"""
+                        INSERT INTO diag_price_daily ({cols})
+                        SELECT {cols} FROM _diag_replace
+                    """)
+        finally:
+            if not df.is_empty():
+                self.conn.unregister("_diag_replace")
+        return len(df)
+
+    def get_diag_prices(
+        self, symbol: str, start: date | None = None, end: date | None = None,
+    ) -> pl.DataFrame:
+        """读取某标的缓存行情 (按日期升序)."""
+        query = "SELECT * FROM diag_price_daily WHERE symbol = ?"
+        params: list = [symbol]
+        if start is not None:
+            query += " AND date >= ?"
+            params.append(start)
+        if end is not None:
+            query += " AND date <= ?"
+            params.append(end)
+        query += " ORDER BY date"
+        result = self.conn.execute(query, params).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    def delete_diag_prices(self, symbol: str) -> int:
+        """删除某标的缓存行情 (重建前清理; 返回删除行数)."""
+        before = self.conn.execute(
+            "SELECT COUNT(*) FROM diag_price_daily WHERE symbol = ?", [symbol]
+        ).fetchone()
+        self.conn.execute(
+            "DELETE FROM diag_price_daily WHERE symbol = ?", [symbol]
+        )
+        return int(before[0]) if before else 0
+
+    # ---- 诊断快照 ----
+
+    @staticmethod
+    def diagnostic_snapshot_id(
+        symbol: str, as_of: date, rules_version: str, price_version: str,
+    ) -> str:
+        """确定性快照 ID (与 UNIQUE(symbol, as_of, rules, price) 一致)."""
+        return f"{symbol}|{as_of.isoformat()}|{rules_version}|{price_version}"
+
+    def upsert_diagnostic_snapshot(self, row: dict) -> None:
+        """写入诊断快照 (幂等: 同键重复运行更新计算时间与内容, 不新增重复行)."""
+        fields = (
+            "snapshot_id", "symbol", "as_of", "rules_version", "price_version",
+            "run_kind", "metrics_json", "contributions_json", "checks_json",
+            "score", "status", "completeness", "trigger",
+        )
+        missing = [f for f in ("snapshot_id", "symbol", "as_of") if not row.get(f)]
+        if missing:
+            raise ValueError(f"diagnostic snapshot missing required fields: {missing}")
+        placeholders = ", ".join(["?"] * len(fields))
+        self.conn.execute(
+            f"""
+            INSERT INTO diagnostic_snapshots ({", ".join(fields)})
+            VALUES ({placeholders})
+            ON CONFLICT (snapshot_id) DO UPDATE SET
+                calculated_at      = now(),
+                run_kind           = EXCLUDED.run_kind,
+                metrics_json       = EXCLUDED.metrics_json,
+                contributions_json = EXCLUDED.contributions_json,
+                checks_json        = EXCLUDED.checks_json,
+                score              = EXCLUDED.score,
+                status             = EXCLUDED.status,
+                completeness       = EXCLUDED.completeness,
+                trigger            = EXCLUDED.trigger
+            """,
+            [row.get(f) for f in fields],
+        )
+
+    def get_latest_diagnostic_snapshot(self, symbol: str) -> dict | None:
+        """最近一次诊断快照 (按 as_of 最新; 无 → None)."""
+        row = self.conn.execute(
+            "SELECT * FROM diagnostic_snapshots WHERE symbol = ? "
+            "ORDER BY as_of DESC, calculated_at DESC LIMIT 1",
+            [symbol],
+        ).fetchone()
+        if row is None:
+            return None
+        columns = [desc[0] for desc in self.conn.description]
+        return dict(zip(columns, row, strict=True))
+
+    def get_diagnostic_snapshots(self, symbol: str, limit: int = 60) -> pl.DataFrame:
+        """某标的历史快照 (最新在前; 用于状态变化追踪)."""
+        result = self.conn.execute(
+            "SELECT * FROM diagnostic_snapshots WHERE symbol = ? "
+            "ORDER BY as_of DESC, calculated_at DESC LIMIT ?",
+            [symbol, int(limit)],
+        ).fetchall()
+        if not result:
+            return pl.DataFrame()
+        columns = [desc[0] for desc in self.conn.description]
+        return pl.DataFrame(result, schema=columns, orient="row")
+
+    def get_latest_snapshot_per_symbol(self) -> pl.DataFrame:
+        """每个标的最近一次快照 (列表视图用; 窗口函数)."""
+        result = self.conn.execute("""
+            SELECT * EXCLUDE (rn) FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY symbol ORDER BY as_of DESC, calculated_at DESC
+                ) AS rn
+                FROM diagnostic_snapshots
+            ) WHERE rn = 1 ORDER BY symbol
+        """).fetchall()
         if not result:
             return pl.DataFrame()
         columns = [desc[0] for desc in self.conn.description]

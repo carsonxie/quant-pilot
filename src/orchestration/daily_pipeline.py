@@ -419,6 +419,7 @@ def _step_update_data(
         return 0
 
     # 质检: 阻断级问题抛 DataQualityError 终止流程 (产品感知涨跌幅, C10)
+    # 已登记权益事件 (M8/I-09 方案1) → 命中登记日期与比例的超限跳变不阻断
     historical = db.get_ohlcv(symbols=symbols)
     stats = compute_historical_stats(historical)
     dq_cfg = settings.get("data_quality", {}).get("daily_change", {})
@@ -432,6 +433,7 @@ def _step_update_data(
         price_limits=limits,
         default_price_limit=float(dq_cfg.get("default_limit_pct", 10.0)) / 100.0,
         price_limit_buffer=float(dq_cfg.get("review_buffer_pct", 2.0)) / 100.0,
+        registered_equity_events=db.get_equity_events(),
     )
     criticals = [i for i in issues if i.severity == "critical"]
     if criticals:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -72,6 +72,8 @@ def run_baseline(
     )
     result_dir = Path(result_dir) if result_dir else Path("data/backtests")
     result_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now()
+    mode = str(project.get("mode", "research"))
 
     db = DuckDBManager(db_path)
     db.init_database()
@@ -87,10 +89,18 @@ def run_baseline(
         except Exception:
             pool_version = None
 
-        simulator = BaselineSimulator(
-            db, settings, config, mode="backtest", live_write=write_account,
-        )
-        result = simulator.run(start, end, deposits=deposits)
+        try:
+            simulator = BaselineSimulator(
+                db, settings, config, mode="backtest", live_write=write_account,
+            )
+            result = simulator.run(start, end, deposits=deposits)
+        except Exception as exc:
+            # 失败试验同样保留 (spec §7.1: 失败不删除; P05-D6)
+            _record_failed_experiment(
+                db, experiment_id, strategy, config, project, cost_scenario,
+                start, end, started_at, exc,
+            )
+            raise
         result.experiment_id = experiment_id
         result.notes.insert(
             0,
@@ -151,11 +161,47 @@ def run_baseline(
                 f"完成: 期间收益 {result.period_return():.2%}, "
                 f"最大回撤 {result.max_drawdown():.2%}, 成交 {result.trades} 笔"
             ),
+            "mode": mode,
+            "started_at": started_at,
+            "finished_at": datetime.now(),
         }]))
         logger.info("实验记录写入: %s (结果 %s)", experiment_id, nav_path)
         return result
     finally:
         db.close()
+
+
+def _record_failed_experiment(
+    db: DuckDBManager,
+    experiment_id: str,
+    strategy: str,
+    config: BaselineConfig,
+    project: dict,
+    cost_scenario: str,
+    start: date,
+    end: date,
+    started_at: datetime,
+    exc: Exception,
+) -> None:
+    """失败试验留痕 (失败不删除, 状态可区分; spec §7.1/P05-D6)."""
+    try:
+        db.upsert_experiment(pl.DataFrame([{
+            "experiment_id": experiment_id,
+            "kind": f"baseline_{strategy.lower()}",
+            "code_version": str(project.get("strategy_version", "unversioned")),
+            "data_version": str(end),
+            "cost_scenario": cost_scenario,
+            "purpose": "固定研究配置基准 (B0/B1); 失败试验保留",
+            "status": "failed",
+            "conclusion": f"运行失败: {type(exc).__name__}: {exc}"[:500],
+            "mode": str(project.get("mode", "research")),
+            "started_at": started_at,
+            "finished_at": datetime.now(),
+            "error": f"{type(exc).__name__}: {exc}"[:500],
+        }]))
+        logger.warning("失败实验已留痕: %s (%s)", experiment_id, exc)
+    except Exception:
+        logger.exception("失败实验留痕失败 (不影响原始错误)")
 
 
 # ------------------------------------------------------------------
