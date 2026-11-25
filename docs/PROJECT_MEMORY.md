@@ -11,11 +11,11 @@
 | 字段                   | 值                                                                  |
 | :--------------------- | :------------------------------------------------------------------ |
 | **项目启动日期** | 2025-07-15                                                          |
-| **当前 Phase**   | Phase 0.5 + M8 ✅ → **Phase 1.1 ✅ 完成（P11-M0–M6, 2026-09-29）** —— 单标的诊断页面可用；下一步 **Phase 1 研究（P1-R1–R6，未开始）** |
-| **当前 Task**    | `docs/task-phase1.1.md`（P11-M0–M6 全 ✅；§11 验收与交接报告）；Phase 1 研究任务独立登记于其 §6（P1-R1–R6, 全部未开始） |
+| **当前 Phase**   | Phase 0.5 + M8 ✅ → Phase 1.1 ✅ 完成（P11-M0–M6, 2026-09-29）→ **Phase 1 研究进行中（P1-M0 ✅；P1-M1-01 ✅；P1-M1-02 ✅；2026-11-25）** |
+| **当前 Task**    | `docs/task-phase1.md`（P1-M0/M1-01/M1-02 ✅；P1-M1-03 待启动）；`docs/task-phase1.1.md` 保留为历史 |
 | **Phase 进度**   | Phase 0 代码 T0.1~T0.10 ✅ / §8.1 收尾补项 6 组 ✅（A0-1…A0-6 全部闭合；推送失败持久化转 M2） |
 | **Gate 状态**    | 工程 Gate + P05-D1–D8 ✅（审计 §5）; **真实账户启用 Gate 未触发**（需用户明确启用, spec §8.7） |
-| **最后更新**     | 2026-09-29 (Phase 1.1 P11-M6 完成 → 阶段收官: 验收对照+在线演示+回归 663/663; 交接见 HANDOFF.md) |
+| **最后更新**     | 2026-11-25 (P1-M1-02：13 条权益事件应用真实库 + 研究价格 rp:v1:84b73c560c57；全量 672/672) |
 
 ---
 
@@ -524,6 +524,33 @@
   - **文档同步**: `task-phase1.1.md`（M6 状态 + **§11 验收与交接报告**）; `HANDOFF.md`（重写为 Phase 1.1 收官交接）; `README.md`（663）; `user_guide.md`（此前已更新）; AGENTS 评估=无需修订（§11.8）
 - **影响范围**: `docs/task-phase1.1.md`、`HANDOFF.md`、`README.md`、`docs/PROJECT_MEMORY.md`; `fundamental_data.py`（银行字段）; `tests/test_fundamental_data.py`、`tests/test_diagnostics_app.py`; 真实库新增演示数据（5 快照 / 2 观察 / securities 缓存）
 - **后续动作**: **Phase 1 研究（P1-R1–R6, 全部未开始, 需用户确认）**: 先 P1-R1（I-09 方案2 权益入账 + A 回测风控对齐）→ P1-R2/R3 因子与 RankIC/ICIR → R4/R5 → R6（先做 I-02 决策）。Phase 1.1 完成 ≠ 实盘授权（真实账户启用 Gate 未触发）
+
+### EV-035 — Phase 1 启动：任务文件、三项决策与权益事件核验（P1-M1-01）🔴
+
+- **日期**: 2026-11-24
+- **类型**: 阶段启动 / 数据核验（I-09 方案2 前置）/ 研究发现
+- **与 task.md 关系**: 覆盖（spec §8.3 Phase 1；原 task T1.x 不适用）
+- **描述**: 用户确认启动 Phase 1:
+  - **三项决策（用户确认）**: ① I-02 保持 Python 3.14，不装 vectorbt/alphalens；RankIC/ICIR 自研；P1-R6 用等价独立验证替代；② 因子 = F1 12-1 动量 + F2 20 日实现波动率（反向）；③ 样本 = 开发 2019–2022 / 验证 2023–2024 / 测试 2025–2026.09（库内数据截止 2026-09-29）
+  - **产出 `docs/task-phase1.md`**: 批次 P1-M0–M6、P1-R1–R6 映射、评估契约预注册（决策时点/标签/ICIR/分组/对照/成本）、不做清单
+  - **P1-M1-01 完成（13/13 权益事件核验）**: 12 条原 inferred + 510500 边界项；官方比例：159928 4.0 / 512010 4.0 / 512690-05-17 2.0 / 512480-2021 2.0 / 513100 5.0 / 513500 2.0 / 159941 4.0 / 516160 0.30912005 / 512100 0.36555 / 512480-2026 2.0 / 159995 2.0 / 510500 1.14542
+  - **关键发现**: ① 原 inferred ratio 含事件日市场波动，研究价格必须用官方比例（否则事件日残留 0.5–2% 假收益）；② **512690 2021-12-31 实为 0.35 元/份分红（非拆分）**；③ **512100 2022-09-05**：原拆分计划 2022-07-30 已取消，实为 2022-09-02 份额合并（0.36555）；④ 单位净值序列拆分后多为重述口径，不能作独立证据；交易所份额 + 公告正文/PDF 可靠；⑤ 510500 2022-08-29（−12.74%）为 2022-08-26 拆分 1.14542，待补登记
+  - **证据**: `data/backups/probe_phase1_equity_events_20261124_225442.json`；`data/backups/equity_event_verification_20261124_233330.json`；`data/backups/512100_merge_20220902.pdf/.txt`；脚本 `scripts/probe_phase1_equity_events.py`、`scripts/verify_equity_events.py`
+  - **验证**: 全量 **663/663**（2026-11-24 复跑，66.9s）
+- **影响范围**: `docs/task-phase1.md`（新）；scripts 两个（新）；库内 `equity_events` 尚未更新（仍 12 条 verified=0；应用归 M1-02，先副本演练）
+- **后续动作**: **P1-M1-02** 应用核验结果（官方比例/分红/510500 补登记，副本演练→真实库）+ 研究价格版本化 → M1-03 权益入账 → M1-04 A 回测 ATR 对齐 → M2 因子注册
+
+### EV-036 — P1-M1-02：核验结果应用 + 版本化研究价格 🔴
+
+- **日期**: 2026-11-25
+- **类型**: 数据应用 / 研究基础设施 / Phase 1 批次完成
+- **描述**:
+  - **应用 13 条核验结果到真实库**: `scripts/apply_equity_verification.py`；DuckDB 原生 `COPY FROM DATABASE` 备份（面板占用文件时 `shutil.copy2` 报 WinError 32）→ 副本 `rehearsal_m1_2.duckdb` 演练 → 真实库应用；13 verified、其余表 counts 稳定、目标 critical 0、重跑指纹一致（`09e1f8885dd6b607`）；510500 补登记；512690 2021-12-31 = `dividend_official`（cash 0.35 入 method，QC ratio 保留 1.371）
+  - **研究价格序列 `src/data_pipeline/research_prices.py`**: `tr_index` 总收益指数（拆分/合并按官方比例、分红按现金加法），`adj_*` 拆分复权（量额不调整），`quality_flag`；版本 **`rp:v1:84b73c560c57`**（事件集 + 数据截止 2026-09-29 + 代码版本）；物化 19 标的到 `data/cleaned/research_prices/` + `_meta.json`；**0 未核验跳变**
+  - **事件日连续性**: 512690 分红 −27.06%→**−0.60%**；512100 合并 +176.27%→**+0.99%**；516160 +221.33%→**−0.67%**；159928 −74.47%→**+2.11%**
+  - **验证**: `tests/test_research_prices.py` 9 例（拆分/合并/分红/同日组合/未核验跳变/版本敏感性/事件解析）；全量 **672/672**；备份 `quant_pilot_20261125_221003_pre_equity_apply.duckdb`；报告 `equity_apply_report.json`
+- **影响范围**: `src/data_pipeline/research_prices.py`（新）；`scripts/apply_equity_verification.py`、`scripts/materialize_research_prices.py`（新）；`tests/test_research_prices.py`（新）；真实库 `equity_events`（13 verified）；`data/cleaned/research_prices/`（新缓存）
+- **后续动作**: **P1-M1-03** 权益入账（模拟账户验证；真实账户需用户启用）→ M1-04 A 回测状态化 ATR 对齐 → M2 因子注册
 
 ---
 

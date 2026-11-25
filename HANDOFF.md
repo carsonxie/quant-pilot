@@ -1,8 +1,18 @@
 # HANDOFF.md — Session 交接文档
 
-> **生成时间**: 2026-09-29 | **分支**: `main` | **最新提交**: `4ac0638 m4 and m5 done`（M6–M8 及 Phase 1.1 全部改动**尚未提交**）
-> **当前状态**: **Phase 1.1（单标的探索与诊断）全部批次 P11-M0–M6 ✅ 完成** —— 任务文件与验收报告见 `docs/task-phase1.1.md`（§11 = 交接报告）
-> **下一步（由用户确认）**: Phase 1 研究（P1-R1–R6，独立追踪）；真实账户启用 Gate 未触发，不自动进入任何阶段
+> **生成时间**: 2026-11-25（Phase 1 M1-02 完成）| **分支**: `main` | **最新提交**: `d6bfbb9 phase 1.1 done`（工作区有 Phase 1 未提交改动）
+> **当前状态**: Phase 1.1 ✅ 完成；**Phase 1：P1-M0 ✅ / P1-M1-01 ✅ / P1-M1-02 ✅**；P1-M1-03 待启动
+> **下一步**: M1-03 权益入账（模拟账户）→ M1-04 A 回测状态化 ATR 对齐 → M2 因子注册；真实账户启用 Gate 未触发
+
+## Phase 1 进度快照（2026-11-25）
+
+- **任务文件**: `docs/task-phase1.md`（P1-M0–M6 批次 + P1-R1–R6 映射 + 评估契约预注册）
+- **决策**: I-02 保持 3.14 + 自研（不装 vectorbt/alphalens）；F1 12-1 动量 + F2 20 日低波；样本 2019–22 / 23–24 / 25–26
+- **权益事件（M1-01/M1-02）**: 13/13 官方核验并**已应用真实库**（13 verified；**512690 2021-12-31 = 0.35 元/份分红**；**512100 = 合并 0.36555**；510500 = 拆分 1.14542 补登记）；备份 `quant_pilot_20261125_221003_pre_equity_apply.duckdb`；报告 `equity_apply_report.json`
+- **研究价格（M1-02）**: `src/data_pipeline/research_prices.py` + `scripts/materialize_research_prices.py`；版本 **`rp:v1:84b73c560c57`**；19 标的、13 事件、0 未核验跳变；输出 `data/cleaned/research_prices/`
+- **测试**: **672/672**（2026-11-25；新增研究价格 9 例）
+- **证据**: `data/backups/equity_event_verification_curated.json`；`data/backups/probe_phase1_equity_events_20261124_225442.json`；`data/backups/512100_merge_20220902.pdf`
+- **注意**: 库内行情截止 2026-09-29；如需更新走 daily 增量并处理权益事件阻断，勿全量 fetch-data 绕过
 
 ---
 
